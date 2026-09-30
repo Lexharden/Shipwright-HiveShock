@@ -552,6 +552,7 @@ class GameInteractor {
         static void BurnPlayer();
         static void ElectrocutePlayer();
         static void KnockbackPlayer(float strength);
+        static void ImpulsePlayer(float velocityY);
         static void GiveOrTakeShield(int32_t shield);
         static void ForceInterfaceUpdate();
         static void UpdateActor(void* refActor);

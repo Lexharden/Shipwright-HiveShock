@@ -130,6 +130,11 @@ void GameInteractor::RawAction::KnockbackPlayer(float strength) {
                                           strength * 5);
 }
 
+void GameInteractor::RawAction::ImpulsePlayer(float velocityY) {
+    Player* player = GET_PLAYER(gPlayState);
+    player->actor.velocity.y = velocityY;
+}
+
 void GameInteractor::RawAction::SetSceneFlag(int16_t sceneNum, int16_t flagType, int16_t flag) {
     switch (flagType) {
         case FlagType::FLAG_SCENE_SWITCH:

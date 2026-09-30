@@ -83,6 +83,7 @@
 #include "soh/Network/CrowdControl/CrowdControl.h"
 #include "soh/Network/Sail/Sail.h"
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/HiveShock/HiveShock.h"
 #include "Enhancements/game-interactor/GameInteractor.h"
 #include "Enhancements/randomizer/draw.h"
 #include <libultraship/controller/controldeck/ControlDeck.h>
@@ -1584,6 +1585,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
     CrowdControl::Instance = new CrowdControl();
     Sail::Instance = new Sail();
     Anchor::Instance = new Anchor();
+    HiveShock::Instance = new HiveShock();
 
     OTRMessage_Init();
     OTRAudio_Init();
@@ -1618,6 +1620,9 @@ extern "C" void InitOTR(int argc, char* argv[]) {
     }
     if (CVarGetInteger(CVAR_REMOTE_ANCHOR("Enabled"), 0)) {
         Anchor::Instance->Enable();
+    }
+    if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0)) {
+        HiveShock::Instance->Enable();
     }
     ShipInit::InitAll();
     Rando::StaticData::InitHashMaps();

@@ -7,6 +7,7 @@
 #include "soh/util.h"
 #include <soh/Network/Sail/Sail.h>
 #include <soh/Network/CrowdControl/CrowdControl.h>
+#include <soh/Network/HiveShock/HiveShock.h>
 #include "soh/SohGui/UIWidgets.hpp"
 
 namespace SohGui {
@@ -171,6 +172,66 @@ void SohMenu::AddMenuNetwork() {
         .RaceDisable(true)
         .Options(CheckboxOptions().Tooltip("Enemies spawned by CrowdControl won't be considered for \"clear enemy "
                                            "rooms\", so they don't need to be killed to complete these rooms."));
+    path.sidebarName = "HiveShock";
+    AddSidebarEntry("Network", path.sidebarName, 3);
+    path.column = SECTION_COLUMN_1;
+
+    AddWidget(path, "About HiveShock", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path,
+              "HiveShock is a lightweight TCP server built into this client: an external "
+              "app/controller connects to it and sends JSON commands to spawn enemies or apply "
+              "effects (heal, damage, buffs, teleports, etc.) on your live game.\n"
+              "\n"
+              "Unlike Sail/Crowd Control, HiveShock listens for an incoming connection instead "
+              "of dialing out. It only accepts connections from this computer (127.0.0.1), so run "
+              "the controller app on the same machine and point it at the address shown below "
+              "once enabled.",
+              WIDGET_TEXT);
+
+    AddWidget(path, "Port", WIDGET_CUSTOM).CustomFunction([](WidgetInfo& info) {
+        ImGui::BeginDisabled(HiveShock::Instance->IsEnabled() || CVarGetInteger(CVAR_SETTING("DisableChanges"), 0));
+        ImGui::Text("%s", info.name.c_str());
+        CVarInputInt("##PortHiveShock", CVAR_REMOTE_HIVESHOCK("Port"),
+                     InputOptions()
+                         .Color(THEME_COLOR)
+                         .PlaceholderText("43000")
+                         .DefaultValue("43000")
+                         .Size(ImVec2(ImGui::GetFontSize() * 5, 0))
+                         .LabelPosition(LabelPositions::None));
+        ImGui::EndDisabled();
+    });
+    AddWidget(path, "Enable##HiveShock", WIDGET_BUTTON)
+        .PreFunc([](WidgetInfo& info) {
+            uint16_t port = CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Port"), 43000);
+            info.options->disabled = !(port > 1024 && port < 65535);
+            if (HiveShock::Instance->IsEnabled()) {
+                info.name = "Disable##HiveShock";
+            } else {
+                info.name = "Enable##HiveShock";
+            }
+        })
+        .Callback([](WidgetInfo& info) {
+            if (HiveShock::Instance->IsEnabled()) {
+                CVarClear(CVAR_REMOTE_HIVESHOCK("Enabled"));
+                Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+                HiveShock::Instance->Disable();
+            } else {
+                CVarSetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 1);
+                Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+                HiveShock::Instance->Enable();
+            }
+        });
+    AddWidget(path, "HiveShock Status", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
+        info.isHidden = !HiveShock::Instance->IsEnabled();
+        if (HiveShock::Instance->HasClient()) {
+            info.name = "Client connected";
+        } else if (HiveShock::Instance->IsListening()) {
+            info.name = "Listening on " + HiveShock::Instance->GetListenEndpoint();
+        } else {
+            info.name = "Starting...";
+        }
+    });
+
     path.sidebarName = "Anchor";
     AddSidebarEntry("Network", path.sidebarName, 2);
 }
