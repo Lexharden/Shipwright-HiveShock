@@ -1459,9 +1459,10 @@ void EnIk_Init(Actor* thisx, PlayState* play) {
         func_80A780D0(this, play);
     }
 
-    // Immediately trigger Iron Knuckle for Enemy Rando and Crowd Control
+    // Immediately trigger Iron Knuckle for Enemy Rando, Crowd Control and HiveShock
     if ((CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
-         (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0))) &&
+         (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) ||
+         (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0))) &&
         (thisx->params == 2 || thisx->params == 3)) {
         this->skelAnime.playSpeed = 1.0f;
     }

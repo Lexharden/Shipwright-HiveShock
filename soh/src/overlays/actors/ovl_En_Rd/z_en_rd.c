@@ -251,12 +251,15 @@ void EnRd_Idle(EnRd* this, PlayState* play) {
 
         this->isMourning = 0;
 
-        if (this->actor.xzDistToPlayer <= 150.0f && func_8002DDE4(play)) {
+        // HiveShock: don't wait for Link to be walking before attacking.
+        if (this->actor.xzDistToPlayer <= 150.0f &&
+            (func_8002DDE4(play) || CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0))) {
             // Add a height check to redeads/gibdos freeze when Enemy Randomizer is on.
             // Without the height check, redeads/gibdos can freeze the player from insane distances in
             // vertical rooms (like the first room in Deku Tree), making these rooms nearly unplayable.
             s8 enemyRandoCCActive = CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
-                                    (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0));
+                                    (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) ||
+                                    (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0));
             if (!enemyRandoCCActive ||
                 (enemyRandoCCActive && this->actor.yDistToPlayer <= 100.0f && this->actor.yDistToPlayer >= -100.0f)) {
                 if ((this->actor.params != 2) && (this->isMourning == 0)) {
@@ -673,7 +676,8 @@ void EnRd_Dead(EnRd* this, PlayState* play) {
     if (SkelAnime_Update(&this->skelAnime)) {
         if (this->timer == 0) {
             s8 enemyRandoCCActive = CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
-                                    (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0));
+                                    (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) ||
+                                    (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0));
             // Don't set this flag in Enemy Rando as it can overlap with other objects using the same flag.
             if (!Flags_GetSwitch(play, this->rdFlags & 0x7F) && !enemyRandoCCActive) {
                 Flags_SetSwitch(play, this->rdFlags & 0x7F);

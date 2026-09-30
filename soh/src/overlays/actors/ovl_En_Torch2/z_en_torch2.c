@@ -5,6 +5,7 @@
  */
 
 #include "z_en_torch2.h"
+#include <string.h>
 #include "objects/object_torch2/object_torch2.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include <libultraship/bridge/consolevariablebridge.h>
@@ -90,6 +91,107 @@ static u8 sStaggerTimer;
 static s8 sLastSwordAnim;
 static u8 sAlpha;
 
+// The original Dark Link keeps all of his state in file-level statics, which is fine for the single fight but
+// means a second one would share (and corrupt) the first's state. To allow several at once (HiveShock), every
+// instance owns a slot; the statics are loaded from it before running and stored back afterwards.
+typedef struct {
+    Actor* owner;
+    f32 stickTilt;
+    s16 stickAngle;
+    f32 swordJumpHeight;
+    s32 holdShieldTimer;
+    u8 zTargetFlag;
+    u8 deathFlag;
+    Input input;
+    u8 swordJumpState;
+    Vec3f spawnPoint;
+    u8 jumpslashTimer;
+    u8 jumpslashFlag;
+    u8 actionState;
+    u8 swordJumpTimer;
+    u8 counterState;
+    u8 dodgeRollState;
+    u8 staggerCount;
+    u8 staggerTimer;
+    s8 lastSwordAnim;
+    u8 alpha;
+} EnTorch2State;
+
+#define ENTORCH2_MAX_INSTANCES 16
+static EnTorch2State sStates[ENTORCH2_MAX_INSTANCES];
+
+static EnTorch2State* EnTorch2_FindState(Actor* actor) {
+    s32 i;
+
+    for (i = 0; i < ENTORCH2_MAX_INSTANCES; i++) {
+        if (sStates[i].owner == actor) {
+            return &sStates[i];
+        }
+    }
+    return NULL;
+}
+
+static EnTorch2State* EnTorch2_AllocState(Actor* actor) {
+    EnTorch2State* state = EnTorch2_FindState(actor);
+    s32 i;
+
+    if (state != NULL) {
+        return state;
+    }
+    for (i = 0; i < ENTORCH2_MAX_INSTANCES; i++) {
+        if (sStates[i].owner == NULL) {
+            memset(&sStates[i], 0, sizeof(EnTorch2State));
+            sStates[i].owner = actor;
+            return &sStates[i];
+        }
+    }
+    return NULL;
+}
+
+static void EnTorch2_LoadState(EnTorch2State* state) {
+    sStickTilt = state->stickTilt;
+    sStickAngle = state->stickAngle;
+    sSwordJumpHeight = state->swordJumpHeight;
+    sHoldShieldTimer = state->holdShieldTimer;
+    sZTargetFlag = state->zTargetFlag;
+    sDeathFlag = state->deathFlag;
+    sInput = state->input;
+    sSwordJumpState = state->swordJumpState;
+    sSpawnPoint = state->spawnPoint;
+    sJumpslashTimer = state->jumpslashTimer;
+    sJumpslashFlag = state->jumpslashFlag;
+    sActionState = state->actionState;
+    sSwordJumpTimer = state->swordJumpTimer;
+    sCounterState = state->counterState;
+    sDodgeRollState = state->dodgeRollState;
+    sStaggerCount = state->staggerCount;
+    sStaggerTimer = state->staggerTimer;
+    sLastSwordAnim = state->lastSwordAnim;
+    sAlpha = state->alpha;
+}
+
+static void EnTorch2_StoreState(EnTorch2State* state) {
+    state->stickTilt = sStickTilt;
+    state->stickAngle = sStickAngle;
+    state->swordJumpHeight = sSwordJumpHeight;
+    state->holdShieldTimer = sHoldShieldTimer;
+    state->zTargetFlag = sZTargetFlag;
+    state->deathFlag = sDeathFlag;
+    state->input = sInput;
+    state->swordJumpState = sSwordJumpState;
+    state->spawnPoint = sSpawnPoint;
+    state->jumpslashTimer = sJumpslashTimer;
+    state->jumpslashFlag = sJumpslashFlag;
+    state->actionState = sActionState;
+    state->swordJumpTimer = sSwordJumpTimer;
+    state->counterState = sCounterState;
+    state->dodgeRollState = sDodgeRollState;
+    state->staggerCount = sStaggerCount;
+    state->staggerTimer = sStaggerTimer;
+    state->lastSwordAnim = sLastSwordAnim;
+    state->alpha = sAlpha;
+}
+
 static DamageTable sDamageTable = {
     /* Deku nut      */ DMG_ENTRY(0, 0x1),
     /* Deku stick    */ DMG_ENTRY(2, 0x0),
@@ -128,11 +230,19 @@ static DamageTable sDamageTable = {
 void EnTorch2_Init(Actor* thisx, PlayState* play2) {
     PlayState* play = play2;
     Player* this = (Player*)thisx;
+    EnTorch2State* state = EnTorch2_AllocState(thisx);
+
+    if (state == NULL) {
+        Actor_Kill(thisx);
+        return;
+    }
+    EnTorch2_LoadState(state);
 
     // Change Dark Link to regular enemy instead of boss with enemy randomizer and crowd control.
     // This way Dark Link will be considered for "clear enemy" rooms properly.
     if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
-        (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0))) {
+        (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) ||
+        (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0))) {
         Actor_ChangeCategory(play, &play->actorCtx, thisx, ACTORCAT_ENEMY);
     }
 
@@ -167,11 +277,25 @@ void EnTorch2_Init(Actor* thisx, PlayState* play2) {
     sLastSwordAnim = 0;
     sAlpha = 95;
     sSpawnPoint = this->actor.home.pos;
+
+    // HiveShock: skip the intro (waiting for Link to come close, then a ~20s fade-in during which Dark Link
+    // never swings) so he is fully opaque and attacking from the moment he spawns.
+    if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0)) {
+        sActionState = ENTORCH2_ATTACK;
+        sAlpha = 255;
+    }
+
+    EnTorch2_StoreState(state);
 }
 
 void EnTorch2_Destroy(Actor* thisx, PlayState* play) {
     s32 pad;
     Player* this = (Player*)thisx;
+    EnTorch2State* state = EnTorch2_FindState(thisx);
+
+    if (state != NULL) {
+        state->owner = NULL;
+    }
 
     Effect_Delete(play, this->meleeWeaponEffectIndex);
     func_800F5B58();
@@ -237,7 +361,7 @@ void EnTorch2_Backflip(Player* this, Input* input, Actor* thisx) {
     sCounterState = 0;
 }
 
-void EnTorch2_Update(Actor* thisx, PlayState* play2) {
+static void EnTorch2_UpdateImpl(Actor* thisx, PlayState* play2) {
     PlayState* play = play2;
     Player* player2 = GET_PLAYER(play2);
     Player* player = player2;
@@ -777,6 +901,17 @@ void EnTorch2_Update(Actor* thisx, PlayState* play2) {
     this->actor.shape.yOffset = sSwordJumpHeight;
 }
 
+void EnTorch2_Update(Actor* thisx, PlayState* play) {
+    EnTorch2State* state = EnTorch2_FindState(thisx);
+
+    if (state == NULL) {
+        return;
+    }
+    EnTorch2_LoadState(state);
+    EnTorch2_UpdateImpl(thisx, play);
+    EnTorch2_StoreState(state);
+}
+
 s32 EnTorch2_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx,
                               Gfx** gfx) {
     Player* this = (Player*)thisx;
@@ -793,7 +928,12 @@ void EnTorch2_PostLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s* r
 void EnTorch2_Draw(Actor* thisx, PlayState* play2) {
     PlayState* play = play2;
     Player* this = (Player*)thisx;
+    EnTorch2State* state = EnTorch2_FindState(thisx);
     s32 pad;
+
+    if (state != NULL) {
+        EnTorch2_LoadState(state);
+    }
 
     OPEN_DISPS(play->state.gfxCtx);
     func_80093C80(play);

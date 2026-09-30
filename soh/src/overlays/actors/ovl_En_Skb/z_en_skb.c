@@ -191,7 +191,8 @@ void EnSkb_Destroy(Actor* thisx, PlayState* play) {
 
 void func_80AFCD60(EnSkb* this) {
     // Don't despawn stallchildren during daytime when enemy randomizer is enabled.
-    if (IS_DAY && !CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
+    if (IS_DAY && !CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
+        !CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0)) {
         func_80AFCF48(this);
     } else if (Actor_IsFacingPlayer(&this->actor, 0x11C7) &&
                (this->actor.xzDistToPlayer < (60.0f + (this->actor.params * 6.0f)))) {

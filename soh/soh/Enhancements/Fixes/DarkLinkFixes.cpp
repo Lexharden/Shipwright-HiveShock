@@ -15,7 +15,8 @@ extern "C" {
 static void RegisterDarkLinkFixes() {
     bool required =
         CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), ENEMY_RANDOMIZER_OFF) != ENEMY_RANDOMIZER_OFF ||
-        CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0) || CVarGetInteger(CVAR_REMOTE_SAIL("Enabled"), 0);
+        CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0) || CVarGetInteger(CVAR_REMOTE_SAIL("Enabled"), 0) ||
+        CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0);
     // prevent dark link from triggering a voidout
     COND_VB_SHOULD(VB_TRIGGER_VOIDOUT, required, {
         Actor* actor = va_arg(args, Actor*);
@@ -76,4 +77,4 @@ static void RegisterDarkLinkFixes() {
 
 static RegisterShipInitFunc initFunc(RegisterDarkLinkFixes,
                                      { CVAR_ENHANCEMENT("RandomizedEnemies"), CVAR_REMOTE_CROWD_CONTROL("Enabled"),
-                                       CVAR_REMOTE_SAIL("Enabled") });
+                                       CVAR_REMOTE_SAIL("Enabled"), CVAR_REMOTE_HIVESHOCK("Enabled") });
