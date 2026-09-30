@@ -424,6 +424,62 @@ install(CODE "
     fixup_bundle(\"\${CMAKE_INSTALL_PREFIX}/../MacOS/soh\" \"\" \"${dirs}\")
     ")
 
+    # --- Fix for Homebrew sdl2-compat ---
+    # Homebrew's SDL2 package may be sdl2-compat, which loads SDL3
+    # dynamically with dlopen(). BundleUtilities cannot detect this
+    # runtime dependency automatically, so fixup_bundle() above never
+    # copies libSDL3 into the app bundle, and the app fails at launch
+    # with "Failed loading SDL3 library".
+    #
+    # We therefore:
+    #   1. Copy libSDL3.0.dylib into the app bundle.
+    #   2. Create libSDL3.dylib -> libSDL3.0.dylib.
+    #   3. Make the SDL3 install name relocatable.
+
+    find_program(BREW_EXECUTABLE brew)
+
+    if(BREW_EXECUTABLE)
+        execute_process(
+            COMMAND ${BREW_EXECUTABLE} --prefix sdl3
+            OUTPUT_VARIABLE SDL3_BREW_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+    endif()
+
+    if(SDL3_BREW_PREFIX AND EXISTS "${SDL3_BREW_PREFIX}/lib/libSDL3.0.dylib")
+
+        install(CODE "
+            set(FRAMEWORKS_DIR
+                \"\${CMAKE_INSTALL_PREFIX}/../Frameworks\"
+            )
+
+            file(MAKE_DIRECTORY \"\${FRAMEWORKS_DIR}\")
+
+            # Copy SDL3 into the bundle
+            file(COPY
+                \"${SDL3_BREW_PREFIX}/lib/libSDL3.0.dylib\"
+                DESTINATION \"\${FRAMEWORKS_DIR}\"
+            )
+
+            # sdl2-compat looks for libSDL3.dylib
+            # Create the symlink expected at runtime.
+            execute_process(
+                COMMAND \${CMAKE_COMMAND} -E create_symlink
+                    \"libSDL3.0.dylib\"
+                    \"\${FRAMEWORKS_DIR}/libSDL3.dylib\"
+            )
+
+            # Make the dylib relocatable inside the app bundle.
+            execute_process(
+                COMMAND install_name_tool
+                    -id \"@rpath/libSDL3.0.dylib\"
+                    \"\${FRAMEWORKS_DIR}/libSDL3.0.dylib\"
+            )
+        ")
+
+    endif()
+
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Windows|NintendoSwitch|CafeOS")
