@@ -221,6 +221,16 @@ void SohMenu::AddMenuNetwork() {
                 HiveShock::Instance->Enable();
             }
         });
+    AddWidget(path, "Enemy Load Limit: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_REMOTE_HIVESHOCK("MaxLoad"))
+        .Options(IntSliderOptions()
+                     .Min(4)
+                     .Max(30)
+                     .DefaultValue(14)
+                     .Format("%d")
+                     .Tooltip("How many enemies spawned through HiveShock can be alive at once. Each enemy uses "
+                              "1 to 4 points (bats and cuccos 1, Dark Link and Iron Knuckles 4). Extra spawns are "
+                              "never discarded: they wait in a queue and enter as enemies are defeated."));
     AddWidget(path, "HiveShock Status", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
         info.isHidden = !HiveShock::Instance->IsEnabled();
         if (HiveShock::Instance->HasClient()) {
