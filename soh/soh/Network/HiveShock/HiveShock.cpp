@@ -40,7 +40,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -80,19 +83,37 @@ constexpr int kDefaultPort = 43000;
 constexpr uint16_t kEventPort = 43002;
 constexpr int kPollIntervalMs = 200;
 constexpr size_t kMaxLineBytes = 8192;
-constexpr size_t kMaxQueueSize = 128;
-constexpr size_t kMaxPendingSpawns = 128;
+// Commands and spawns are never dropped to make room: a viewer paid for them. These only bound memory, and when
+// they are exceeded the NEWEST entry is rejected (and logged), never an older one.
+constexpr size_t kMaxQueueSize = 1024;
+constexpr size_t kMaxPendingSpawns = 1000;
 constexpr size_t kMaxNameTagChars = 18;
 constexpr s16 kMinHealthAfterDamage = 4;
 constexpr float kDefaultShockDamage = 8.0f;
-// PC collider lists are 150/180/150; keep a margin for the scene + Link.
+// Hard engine limits (PC collider lists are 150/180/150; keep a margin for the scene + Link). Reaching them delays
+// spawns, it never removes an enemy.
 constexpr s32 kMaxBridgeEnemies = 32;
 constexpr s32 kMaxSceneEnemies = 40;
-constexpr s32 kSpawnsPerFrame = 4;
-// Gameplay runs at 20 frames/s. A spawn held back by a fight/cutscene is retried every half second for up to a minute.
-constexpr u32 kDeferRecheckFrames = 10;
-constexpr u32 kMaxSpawnWaitFrames = 60 * 20;
+// Soft budget: sum of SpawnDef::weight of the live injected enemies. Configurable with gRemote.HiveShock.MaxLoad.
+constexpr s32 kDefaultMaxLoad = 14;
+// Gameplay runs at 20 frames/s. Spawns are released at most one every ~0.4 s so a refill never arrives as a burst.
+constexpr u32 kSpawnGapFrames = 8;
+// Retry cadence for a spawn that is held (not allowed here right now) or that failed to place an actor.
+constexpr u32 kHeldRecheckFrames = 10;
+constexpr u32 kFailedRetryFrames = 20;
 constexpr u32 kCuccoArmyFrameGap = 4;
+// After the room changes, injected enemies that vanish while still alive were dropped by the room swap (not killed),
+// so they are queued again instead of being lost.
+constexpr u32 kRoomGraceTicks = 40;
+// An injected enemy this far from Link for this long is considered stuck and is moved next to him.
+constexpr f32 kStuckDistance = 700.0f;
+constexpr u32 kStuckTicks = 20 * 20;
+constexpr u32 kStuckCheckTicks = 20;
+// Pending spawns are written to disk (throttled) so a crash or restart does not lose what viewers paid for.
+constexpr u32 kBacklogSaveTicks = 100;
+constexpr s64 kBacklogMaxAgeSeconds = 12 * 60 * 60;
+constexpr u32 kQueueReportTicks = 10;
+constexpr const char* kBacklogFileName = "hiveshock_pending.json";
 constexpr f32 kDefaultSpeedMult = 2.0f;
 constexpr f32 kDefaultSlowMult = 0.5f;
 constexpr f32 kDefaultDamageMult = 3.0f;
@@ -106,9 +127,10 @@ using SocketHandle = int;
 constexpr SocketHandle kInvalidSocket = -1;
 #endif
 
-// Applied: done. Deferred: not possible right now, try again later. Skipped: failed this time, may retry a few times.
-// Rejected: never valid here (e.g. a boss room), drop it.
-enum class ApplyResult { Applied, Deferred, Skipped, Rejected };
+// Applied: done. Deferred: not possible right now for everybody (budget, cutscene, room load), so stop and retry
+// later. Held: not possible for THIS entry only (a boss room, the Lizalfos mini-boss), so keep it and let others
+// pass. Skipped: failed this time (e.g. no actor could be placed), retry later. Rejected: unknown / invalid command.
+enum class ApplyResult { Applied, Deferred, Held, Skipped, Rejected };
 
 enum class BridgeBuff : u8 {
     Speed = 0,
@@ -129,6 +151,8 @@ struct SpawnDef {
     s16 actorId;
     s32 params;
     bool useSpawnActor;
+    // How much of the MaxLoad budget a live instance uses (0 = free: fairy, bombchu).
+    u8 weight;
 };
 
 struct WarpAlias {
@@ -139,14 +163,20 @@ struct WarpAlias {
 struct PendingSpawn {
     std::string name;
     std::string user;
-    u32 earliestFrame = 0;
-    u32 deadlineFrame = 0; // set the first time a spawn is deferred; 0 = not deferred yet
-    u8 retries = 0;
+    u32 earliestTick = 0; // compared against gTick
+    u32 attempts = 0;     // failed placements, only used to throttle logging
+    s64 createdAt = 0;    // unix seconds, only used to expire entries restored from disk
 };
 
 struct TrackedEnemy {
     Actor* actor = nullptr;
-    u32 spawnFrame = 0;
+    const SpawnDef* def = nullptr;
+    std::string user;
+    u32 spawnTick = 0;
+    u8 weight = 0;
+    bool alive = true;      // false once it was seen dead (health reached 0): a dying enemy is not requeued
+    bool sawHealth = false; // some actors (cuccos) never have health, so "health == 0" only means dead if it was > 0
+    u32 farSinceTick = 0;   // 0 = close enough to Link
 };
 
 std::mutex gQueueMutex;
@@ -168,42 +198,56 @@ bool gInvertControls = false;
 Clock::time_point gInvertUntil{};
 BuffState gBuffs[static_cast<size_t>(BridgeBuff::Count)]{};
 
+// Spawns waiting for room in the budget, oldest first. Survives scene changes and game over; only an explicit
+// Disable() clears it.
 std::deque<PendingSpawn> gPendingSpawns;
 std::vector<TrackedEnemy> gTrackedEnemies;
+// Monotonic game-update counter. Unlike gameplayFrames it does not restart on every scene load, so delays and
+// spacing computed from it stay valid across scene changes.
+u32 gTick = 0;
+u32 gNextSpawnTick = 0;
+u32 gRoomGraceUntilTick = 0;
+s16 gLastRoom = -1;
+bool gBacklogDirty = false;
+bool gBacklogLoaded = false;
+u32 gLastBacklogSaveTick = 0;
+u32 gLastQueueReportTick = 0;
+bool gQueueReportForce = true;
+std::string gLastQueueReport;
 
 constexpr SpawnDef kSpawnTable[] = {
-    { "enemy", ACTOR_EN_RR, 0, false },
-    { "like_like", ACTOR_EN_RR, 0, false },
-    { "guay", ACTOR_EN_CROW, 0, false },
-    { "keese", ACTOR_EN_FIREFLY, 2, false },
-    { "fire_keese", ACTOR_EN_FIREFLY, 1, false },
-    { "ice_keese", ACTOR_EN_FIREFLY, 4, false },
-    { "chuchu", ACTOR_EN_TITE, 0, false },
-    { "redead", ACTOR_EN_RD, 0, false },
-    { "gibdo", ACTOR_EN_RD, 32766, false },
-    { "wolfos", ACTOR_EN_WF, (0xFF << 8), false },
-    { "white_wolfos", ACTOR_EN_WF, (0xFF << 8) | 1, false },
-    { "stalchild", ACTOR_EN_SKB, 0, false },
-    { "stalfos", ACTOR_EN_TEST, 2, false },
-    { "bubble", ACTOR_EN_BB, 0, false },
-    { "skulltula", ACTOR_EN_ST, 0, false },
-    { "bat", ACTOR_EN_FIREFLY, 2, false },
-    { "tektite", ACTOR_EN_TITE, 0, false },
-    { "blue_tektite", ACTOR_EN_TITE, -1, false },
-    { "freezard", ACTOR_EN_FZ, 0, false },
-    { "cucco", ACTOR_EN_NIW, 0, true },
-    { "dinolfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFE, false },
-    { "lizalfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFF, false },
-    { "iron_knuckle", ACTOR_EN_IK, 2, false },
-    { "garo", ACTOR_EN_TEST, 2, false },
-    { "garo_master", ACTOR_EN_IK, 2, false },
-    { "wallmaster", ACTOR_EN_WALLMAS, 0, false },
-    { "floormaster", ACTOR_EN_FLOORMAS, 0, false },
-    { "eyegore", ACTOR_EN_IK, 2, false },
-    { "dark_link", ACTOR_EN_TORCH2, 0, false },
-    { "arwing", ACTOR_EN_CLEAR_TAG, 1, false },
-    { "fairy", ACTOR_EN_ELF, 0, true },
-    { "bombchu", ACTOR_EN_BOM_CHU, 0, true },
+    { "enemy", ACTOR_EN_RR, 0, false, 2 },
+    { "like_like", ACTOR_EN_RR, 0, false, 2 },
+    { "guay", ACTOR_EN_CROW, 0, false, 1 },
+    { "keese", ACTOR_EN_FIREFLY, 2, false, 1 },
+    { "fire_keese", ACTOR_EN_FIREFLY, 1, false, 1 },
+    { "ice_keese", ACTOR_EN_FIREFLY, 4, false, 1 },
+    { "chuchu", ACTOR_EN_TITE, 0, false, 2 },
+    { "redead", ACTOR_EN_RD, 0, false, 2 },
+    { "gibdo", ACTOR_EN_RD, 32766, false, 2 },
+    { "wolfos", ACTOR_EN_WF, (0xFF << 8), false, 2 },
+    { "white_wolfos", ACTOR_EN_WF, (0xFF << 8) | 1, false, 3 },
+    { "stalchild", ACTOR_EN_SKB, 0, false, 1 },
+    { "stalfos", ACTOR_EN_TEST, 2, false, 3 },
+    { "bubble", ACTOR_EN_BB, 0, false, 1 },
+    { "skulltula", ACTOR_EN_ST, 0, false, 1 },
+    { "bat", ACTOR_EN_FIREFLY, 2, false, 1 },
+    { "tektite", ACTOR_EN_TITE, 0, false, 1 },
+    { "blue_tektite", ACTOR_EN_TITE, -1, false, 2 },
+    { "freezard", ACTOR_EN_FZ, 0, false, 1 },
+    { "cucco", ACTOR_EN_NIW, 0, true, 1 },
+    { "dinolfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFE, false, 3 },
+    { "lizalfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFF, false, 3 },
+    { "iron_knuckle", ACTOR_EN_IK, 2, false, 4 },
+    { "garo", ACTOR_EN_TEST, 2, false, 3 },
+    { "garo_master", ACTOR_EN_IK, 2, false, 4 },
+    { "wallmaster", ACTOR_EN_WALLMAS, 0, false, 2 },
+    { "floormaster", ACTOR_EN_FLOORMAS, 0, false, 3 },
+    { "eyegore", ACTOR_EN_IK, 2, false, 4 },
+    { "dark_link", ACTOR_EN_TORCH2, 0, false, 4 },
+    { "arwing", ACTOR_EN_CLEAR_TAG, 1, false, 2 },
+    { "fairy", ACTOR_EN_ELF, 0, true, 0 },
+    { "bombchu", ACTOR_EN_BOM_CHU, 0, true, 0 },
 };
 
 constexpr const char* kRandomEnemies[] = {
@@ -428,18 +472,15 @@ sockaddr_in LoopbackAddress(uint16_t port) {
 void PushCommand(json cmd) {
     std::lock_guard<std::mutex> lock(gQueueMutex);
     if (gCommandQueue.size() >= kMaxQueueSize) {
-        SPDLOG_WARN("[HiveShock] queue full ({}), dropping oldest command", kMaxQueueSize);
-        gCommandQueue.pop_front();
+        SPDLOG_WARN("[HiveShock] command queue full ({}), rejecting the new command", kMaxQueueSize);
+        return;
     }
     gCommandQueue.push_back(std::move(cmd));
 }
 
+// Puts back a command that was just popped, so it always fits (the size cap only applies to new arrivals).
 void PushCommandFront(json cmd) {
     std::lock_guard<std::mutex> lock(gQueueMutex);
-    if (gCommandQueue.size() >= kMaxQueueSize) {
-        SPDLOG_WARN("[HiveShock] queue full ({}), dropping newest command", kMaxQueueSize);
-        gCommandQueue.pop_back();
-    }
     gCommandQueue.push_front(std::move(cmd));
 }
 
@@ -736,52 +777,107 @@ s32 CountSceneEnemies() {
     return gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].length;
 }
 
+s64 UnixNow() {
+    return static_cast<s64>(std::time(nullptr));
+}
+
+// Puts a spawn back at the FRONT of the backlog, e.g. an enemy that was alive when the scene changed: the viewer's
+// gift follows Link instead of being lost. It bypasses the backlog size cap on purpose.
+void RequeueFront(const TrackedEnemy& enemy) {
+    if (enemy.def == nullptr) {
+        return;
+    }
+    PendingSpawn pending;
+    pending.name = enemy.def->name;
+    pending.user = enemy.user;
+    pending.earliestTick = gTick;
+    pending.createdAt = UnixNow();
+    gPendingSpawns.push_front(std::move(pending));
+    gBacklogDirty = true;
+}
+
+// Requeues the given survivors keeping their original order (oldest ends up first).
+void RequeueSurvivors(const std::vector<TrackedEnemy>& survivors) {
+    for (auto it = survivors.rbegin(); it != survivors.rend(); ++it) {
+        RequeueFront(*it);
+    }
+    if (!survivors.empty()) {
+        SPDLOG_INFO("[HiveShock] {} enemies survived a scene/room change, queued again", survivors.size());
+    }
+}
+
+bool TrackedStillLoaded(const TrackedEnemy& t) {
+    // The id check guards against a freed actor whose memory was reused by a different one.
+    return ActorStillLoaded(t.actor) && t.def != nullptr && t.actor->id == t.def->actorId;
+}
+
+// Drops enemies that are gone. A normal death just disappears; but right after a room change an enemy that vanishes
+// while still alive was removed by the room swap, so it is requeued rather than lost. Only call this from the
+// per-frame update (never while the backlog is being iterated).
 void PruneTrackedEnemies() {
-    gTrackedEnemies.erase(std::remove_if(gTrackedEnemies.begin(), gTrackedEnemies.end(),
-                                         [](const TrackedEnemy& t) { return !ActorStillLoaded(t.actor); }),
-                          gTrackedEnemies.end());
+    std::vector<TrackedEnemy> survivors;
+    const bool inRoomGrace = gTick < gRoomGraceUntilTick;
+    for (auto it = gTrackedEnemies.begin(); it != gTrackedEnemies.end();) {
+        if (TrackedStillLoaded(*it)) {
+            ++it;
+            continue;
+        }
+        if (inRoomGrace && it->alive) {
+            survivors.push_back(std::move(*it));
+        }
+        it = gTrackedEnemies.erase(it);
+    }
+    RequeueSurvivors(survivors);
 }
 
 size_t CountLiveTrackedEnemies() {
-    PruneTrackedEnemies();
     return gTrackedEnemies.size();
 }
 
-void DeleteOldestBridgeEnemy() {
-    PruneTrackedEnemies();
-    if (gTrackedEnemies.empty()) {
-        return;
-    }
-    auto oldest =
-        std::min_element(gTrackedEnemies.begin(), gTrackedEnemies.end(),
-                         [](const TrackedEnemy& a, const TrackedEnemy& b) { return a.spawnFrame < b.spawnFrame; });
-    if (ActorStillLoaded(oldest->actor)) {
-        Actor_Kill(oldest->actor);
-    }
-    gTrackedEnemies.erase(oldest);
+s32 GetMaxLoad() {
+    return std::max(1, CVarGetInteger(CVAR_REMOTE_HIVESHOCK("MaxLoad"), kDefaultMaxLoad));
 }
 
-void EnsureActorHeadroom() {
-    PruneTrackedEnemies();
-    while (!gTrackedEnemies.empty() &&
-           (CountLiveTrackedEnemies() >= kMaxBridgeEnemies || CountSceneEnemies() >= kMaxSceneEnemies)) {
-        DeleteOldestBridgeEnemy();
+// Budget used by the injected enemies that are still alive.
+s32 CurrentLoad() {
+    s32 load = 0;
+    for (const TrackedEnemy& t : gTrackedEnemies) {
+        load += t.weight;
     }
+    return load;
 }
 
-void TrackBridgeEnemy(Actor* actor) {
+// True when one more enemy of this weight fits. Nothing is ever killed to make room: if it does not fit, the spawn
+// simply waits until something dies. An enemy heavier than the whole budget is still allowed on its own, so it can
+// never wait forever.
+bool HasRoomFor(const SpawnDef& def) {
+    if (!IsTrackedSpawnName(def.name)) {
+        return CountSceneEnemies() < kMaxSceneEnemies;
+    }
+    if (CountSceneEnemies() >= kMaxSceneEnemies || CountLiveTrackedEnemies() >= kMaxBridgeEnemies) {
+        return false;
+    }
+    const s32 load = CurrentLoad();
+    return load == 0 || load + def.weight <= GetMaxLoad();
+}
+
+void TrackBridgeEnemy(Actor* actor, const SpawnDef& def, const std::string& user) {
     if (actor == nullptr) {
         return;
     }
-    EnsureActorHeadroom();
-    u32 now = gPlayState->gameplayFrames;
-    gTrackedEnemies.push_back(TrackedEnemy{ actor, now });
+    TrackedEnemy tracked;
+    tracked.actor = actor;
+    tracked.def = &def;
+    tracked.user = user;
+    tracked.spawnTick = gTick;
+    tracked.weight = def.weight;
+    gTrackedEnemies.push_back(std::move(tracked));
 }
 
+// Explicit streamer action: kills the live injected enemies. Spawns still waiting in the backlog are untouched.
 void ClearBridgeEnemies() {
-    PruneTrackedEnemies();
     for (TrackedEnemy& t : gTrackedEnemies) {
-        if (ActorStillLoaded(t.actor)) {
+        if (TrackedStillLoaded(t)) {
             Actor_Kill(t.actor);
         }
     }
@@ -789,20 +885,41 @@ void ClearBridgeEnemies() {
     SPDLOG_INFO("[HiveShock] cleared bridge enemies");
 }
 
-void ResetBridgeActorTracking() {
-    gTrackedEnemies.clear();
+// Explicit streamer action: forgets the spawns that are still waiting.
+void ClearPendingSpawns() {
+    SPDLOG_INFO("[HiveShock] cleared {} pending spawns", gPendingSpawns.size());
+    gPendingSpawns.clear();
+    gBacklogDirty = true;
 }
 
-void EnqueueEnemySpawn(std::string name, std::string user, u32 delayFrames) {
-    while (gPendingSpawns.size() >= kMaxPendingSpawns) {
-        SPDLOG_WARN("[HiveShock] pending spawn queue full, dropping oldest");
-        gPendingSpawns.pop_front();
+// The scene is going away (or we are at the title screen): everything injected that was still alive is queued again
+// so it reappears next to Link, and the tracking starts clean. Does not touch the old actor pointers.
+void ResetBridgeActorTracking() {
+    std::vector<TrackedEnemy> survivors;
+    for (TrackedEnemy& t : gTrackedEnemies) {
+        if (t.alive) {
+            survivors.push_back(std::move(t));
+        }
+    }
+    gTrackedEnemies.clear();
+    RequeueSurvivors(survivors);
+}
+
+// Returns false only if the backlog is full, in which case the new spawn is rejected (older ones are kept).
+bool EnqueueEnemySpawn(std::string name, std::string user, u32 delayTicks) {
+    if (gPendingSpawns.size() >= kMaxPendingSpawns) {
+        SPDLOG_WARN("[HiveShock] spawn backlog full ({}), rejecting '{}'", kMaxPendingSpawns, name);
+        SendEventToBridge({ { "event", "spawn_rejected" }, { "action", name }, { "user", user } });
+        return false;
     }
     PendingSpawn pending;
     pending.name = std::move(name);
     pending.user = std::move(user);
-    pending.earliestFrame = (gPlayState != nullptr) ? (gPlayState->gameplayFrames + delayFrames) : delayFrames;
+    pending.earliestTick = gTick + delayTicks;
+    pending.createdAt = UnixNow();
     gPendingSpawns.push_back(std::move(pending));
+    gBacklogDirty = true;
+    return true;
 }
 
 Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY, s16 rotZ, s32 params) {
@@ -882,35 +999,12 @@ bool IsLizalfosMinibossActive() {
     return false;
 }
 
-ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user) {
-    if (gPlayState == nullptr) {
-        return ApplyResult::Deferred;
-    }
-    Player* player = GET_PLAYER(gPlayState);
-    if (player == nullptr) {
-        return ApplyResult::Deferred;
-    }
-    if (!CanSpawnInCurrentScene(def)) {
-        return ApplyResult::Rejected;
-    }
-    // Room still loading, or a cutscene is running: wait rather than spawn into a half-initialised scene.
-    if (gPlayState->roomCtx.status != 0 || gPlayState->csCtx.state != CS_STATE_IDLE) {
-        return ApplyResult::Deferred;
-    }
-    if (def.actorId == ACTOR_EN_ZF && IsLizalfosMinibossActive()) {
-        return ApplyResult::Deferred;
-    }
-
-    EnsureActorHeadroom();
-    if (IsTrackedSpawnName(def.name) &&
-        (CountLiveTrackedEnemies() >= kMaxBridgeEnemies || CountSceneEnemies() >= kMaxSceneEnemies)) {
-        SPDLOG_WARN("[HiveShock] spawn cap reached, skipping {}", def.name);
-        return ApplyResult::Skipped;
-    }
-
+// Picks a spot on the floor around Link for this enemy (in front of him first). Always fills pos; returns false
+// only if no floor was found at all and Link's own position had to be used.
+bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
     // Try several nearby points. A single raycast into void (indoors / cliffs)
     // used to return Deferred forever and stall the whole pending spawn queue.
-    Vec3f pos = player->actor.world.pos;
+    pos = player->actor.world.pos;
     bool foundFloor = false;
     // Some enemies only wake up when Link is within a short range (Stalchild: 60 units, Redead/Gibdo: 150),
     // so spawn those closer to have them attack right away.
@@ -962,13 +1056,39 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user) {
     if (def.actorId == ACTOR_EN_NIW) {
         pos.y = player->actor.world.pos.y + 80.0f;
     }
+    return foundFloor;
+}
+
+ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user) {
+    if (gPlayState == nullptr) {
+        return ApplyResult::Deferred;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    if (player == nullptr) {
+        return ApplyResult::Deferred;
+    }
+    // Not allowed in this place (boss rooms): keep the spawn for when Link is somewhere it works.
+    if (!CanSpawnInCurrentScene(def)) {
+        return ApplyResult::Held;
+    }
+    // Room still loading, or a cutscene is running: wait rather than spawn into a half-initialised scene.
+    if (gPlayState->roomCtx.status != 0 || gPlayState->csCtx.state != CS_STATE_IDLE) {
+        return ApplyResult::Deferred;
+    }
+    if (def.actorId == ACTOR_EN_ZF && IsLizalfosMinibossActive()) {
+        return ApplyResult::Held;
+    }
+    // No room in the budget: wait for an enemy to die instead of removing one.
+    if (!HasRoomFor(def)) {
+        return ApplyResult::Deferred;
+    }
+
+    Vec3f pos;
+    FindSpawnPosition(def, player, pos);
+    const s16 yawBase = player->actor.shape.rot.y;
 
     s16 faceYaw = Math_Vec3f_Yaw(&pos, &player->actor.world.pos);
     Actor* spawned = SpawnActorInAnyRoom(def.actorId, pos.x, pos.y, pos.z, 0, faceYaw, 0, def.params);
-    if (spawned == nullptr) {
-        EnsureActorHeadroom();
-        spawned = SpawnActorInAnyRoom(def.actorId, pos.x, pos.y, pos.z, 0, faceYaw, 0, def.params);
-    }
     if (spawned == nullptr) {
         // Fall back beside Link if the chosen point is invalid for Actor_Spawn.
         pos = player->actor.world.pos;
@@ -999,10 +1119,168 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user) {
     }
 
     if (IsTrackedSpawnName(def.name)) {
-        TrackBridgeEnemy(spawned);
+        TrackBridgeEnemy(spawned, def, user);
     }
     SPDLOG_INFO("[HiveShock] spawned {} at ({:.1f}, {:.1f}, {:.1f})", def.name, pos.x, pos.y, pos.z);
     return ApplyResult::Applied;
+}
+
+// Moves a stuck enemy next to Link. The enemy is NOT removed, so the viewer's gift keeps fighting.
+void RelocateNearLink(TrackedEnemy& tracked, Player* player) {
+    Vec3f pos;
+    FindSpawnPosition(*tracked.def, player, pos);
+    Actor* actor = tracked.actor;
+    actor->world.pos = pos;
+    actor->prevPos = pos;
+    actor->home.pos = pos;
+    actor->velocity.x = 0.0f;
+    actor->velocity.y = 0.0f;
+    actor->velocity.z = 0.0f;
+    actor->speedXZ = 0.0f;
+    SPDLOG_INFO("[HiveShock] moved stuck {} next to Link", tracked.def->name);
+}
+
+// Per-frame upkeep of the live injected enemies: forget the dead (requeueing the ones lost to a room change), note
+// which are dying, and bring back any that has been left far behind so it cannot hold a budget slot forever.
+void UpdateTrackedEnemies() {
+    PruneTrackedEnemies();
+    if (gTrackedEnemies.empty() || gPlayState == nullptr) {
+        return;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    const bool checkStuck = player != nullptr && (gTick % kStuckCheckTicks) == 0 && !IsSceneChangeInProgress() &&
+                            gPlayState->roomCtx.status == 0 && gPlayState->csCtx.state == CS_STATE_IDLE;
+
+    for (TrackedEnemy& tracked : gTrackedEnemies) {
+        Actor* actor = tracked.actor;
+        if (actor->colChkInfo.health > 0) {
+            tracked.sawHealth = true;
+        } else if (tracked.sawHealth) {
+            tracked.alive = false;
+        }
+        if (!checkStuck || !tracked.alive) {
+            continue;
+        }
+
+        // Measured from the positions: the cached xzDistToPlayer is only refreshed while the actor updates, which a
+        // culled (far away) enemy does not.
+        const f32 dx = actor->world.pos.x - player->actor.world.pos.x;
+        const f32 dy = actor->world.pos.y - player->actor.world.pos.y;
+        const f32 dz = actor->world.pos.z - player->actor.world.pos.z;
+        const bool tooFar = (dx * dx + dy * dy + dz * dz) > (kStuckDistance * kStuckDistance);
+        if (!tooFar) {
+            tracked.farSinceTick = 0;
+        } else if (tracked.farSinceTick == 0) {
+            tracked.farSinceTick = gTick;
+        } else if (gTick - tracked.farSinceTick >= kStuckTicks) {
+            RelocateNearLink(tracked, player);
+            tracked.farSinceTick = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Backlog persistence: the spawns still waiting are mirrored to hiveshock_pending.json (throttled) so a crash or a
+// restart does not lose what viewers paid for. Entries older than kBacklogMaxAgeSeconds are discarded on load.
+// ---------------------------------------------------------------------------------------------
+
+std::filesystem::path BacklogPath() {
+    return std::filesystem::path(Ship::Context::GetPathRelativeToAppDirectory(kBacklogFileName));
+}
+
+void SaveBacklog() {
+    gBacklogDirty = false;
+    gLastBacklogSaveTick = gTick;
+    try {
+        const std::filesystem::path path = BacklogPath();
+        std::error_code ec;
+        if (gPendingSpawns.empty()) {
+            std::filesystem::remove(path, ec);
+            return;
+        }
+        json spawns = json::array();
+        for (const PendingSpawn& pending : gPendingSpawns) {
+            spawns.push_back({ { "name", pending.name }, { "user", pending.user }, { "t", pending.createdAt } });
+        }
+        const json doc = { { "version", 1 }, { "spawns", spawns } };
+
+        // Write to a temp file and rename, so a crash mid-write never leaves a truncated backlog.
+        std::filesystem::path tmp = path;
+        tmp += ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            out << doc.dump();
+            if (!out.good()) {
+                SPDLOG_WARN("[HiveShock] could not write {}", tmp.string());
+                return;
+            }
+        }
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            SPDLOG_WARN("[HiveShock] could not replace {}: {}", path.string(), ec.message());
+        }
+    } catch (const std::exception& e) { SPDLOG_WARN("[HiveShock] saving the spawn backlog failed: {}", e.what()); }
+}
+
+void LoadBacklog() {
+    gBacklogLoaded = true;
+    try {
+        std::ifstream in(BacklogPath(), std::ios::binary);
+        if (!in.good()) {
+            return;
+        }
+        const json doc = json::parse(in);
+        if (!doc.contains("spawns") || !doc["spawns"].is_array()) {
+            return;
+        }
+        const s64 now = UnixNow();
+        size_t restored = 0;
+        for (const json& entry : doc["spawns"]) {
+            if (gPendingSpawns.size() >= kMaxPendingSpawns || !entry.is_object()) {
+                break;
+            }
+            PendingSpawn pending;
+            pending.name = GetStringField(entry, "name");
+            pending.user = GetStringField(entry, "user");
+            pending.createdAt = entry.contains("t") && entry["t"].is_number_integer() ? entry["t"].get<s64>() : now;
+            if (FindSpawnDef(pending.name) == nullptr || now - pending.createdAt > kBacklogMaxAgeSeconds) {
+                continue;
+            }
+            pending.earliestTick = gTick;
+            gPendingSpawns.push_back(std::move(pending));
+            restored++;
+        }
+        if (restored > 0) {
+            SPDLOG_INFO("[HiveShock] restored {} pending spawns from the previous session", restored);
+        }
+    } catch (const std::exception& e) { SPDLOG_WARN("[HiveShock] loading the spawn backlog failed: {}", e.what()); }
+    gBacklogDirty = false;
+}
+
+void TickBacklogPersistence() {
+    if (gBacklogDirty && gTick - gLastBacklogSaveTick >= kBacklogSaveTicks) {
+        SaveBacklog();
+    }
+}
+
+// Tells the companion how many spawns wait and how loaded the game is (only when it changes, at most every ~0.5 s).
+void TickQueueReport() {
+    if (!gQueueReportForce && gTick - gLastQueueReportTick < kQueueReportTicks) {
+        return;
+    }
+    gLastQueueReportTick = gTick;
+    const json report = { { "event", "spawn_queue" },
+                          { "pending", gPendingSpawns.size() },
+                          { "active", gTrackedEnemies.size() },
+                          { "load", CurrentLoad() },
+                          { "max", GetMaxLoad() } };
+    const std::string serialized = report.dump();
+    if (!gQueueReportForce && serialized == gLastQueueReport) {
+        return;
+    }
+    gQueueReportForce = false;
+    gLastQueueReport = serialized;
+    SendEventToBridge(report);
 }
 
 void TickPendingSpawns() {
@@ -1013,55 +1291,52 @@ void TickPendingSpawns() {
         return;
     }
 
-    s32 spawnedThisFrame = 0;
-    size_t attempts = gPendingSpawns.size();
-    while (!gPendingSpawns.empty() && spawnedThisFrame < kSpawnsPerFrame && attempts-- > 0) {
-        PendingSpawn pending = gPendingSpawns.front();
-        gPendingSpawns.pop_front();
+    // One spawn per turn, kSpawnGapFrames apart, so a refill after several deaths never arrives as a burst.
+    if (gTick < gNextSpawnTick) {
+        return;
+    }
 
-        if (gPlayState->gameplayFrames < pending.earliestFrame) {
-            gPendingSpawns.push_back(std::move(pending));
+    // First in, first out. A spawn that is blocked for everybody (budget, cutscene, room load) stops the scan, so
+    // a heavy enemy at the front keeps its turn instead of being overtaken by lighter ones. A spawn that is only
+    // blocked for itself (boss room, Lizalfos mini-boss) is stepped over and kept.
+    for (auto it = gPendingSpawns.begin(); it != gPendingSpawns.end();) {
+        if (gTick < it->earliestTick) {
+            ++it;
             continue;
         }
 
-        const SpawnDef* def = FindSpawnDef(pending.name);
+        const SpawnDef* def = FindSpawnDef(it->name);
         if (def == nullptr) {
-            SPDLOG_WARN("[HiveShock] pending spawn unknown '{}'", pending.name);
+            SPDLOG_WARN("[HiveShock] pending spawn unknown '{}', discarding", it->name);
+            it = gPendingSpawns.erase(it);
+            gBacklogDirty = true;
             continue;
         }
 
-        ApplyResult result = SpawnDefNow(*def, pending.user);
-        if (result == ApplyResult::Applied) {
-            spawnedThisFrame++;
-            continue;
-        }
-
-        if (result == ApplyResult::Rejected) {
-            SPDLOG_INFO("[HiveShock] '{}' not allowed in scene {}, dropped", pending.name, gPlayState->sceneNum);
-            continue;
-        }
-        if (result == ApplyResult::Deferred) {
-            // Held back by something that will pass (fight, cutscene, room load): keep it for a while, without
-            // burning the retry budget, and drop it if it is still blocked after kMaxSpawnWaitFrames.
-            if (pending.deadlineFrame == 0) {
-                pending.deadlineFrame = gPlayState->gameplayFrames + kMaxSpawnWaitFrames;
-            }
-            if (gPlayState->gameplayFrames < pending.deadlineFrame) {
-                pending.earliestFrame = gPlayState->gameplayFrames + kDeferRecheckFrames;
-                gPendingSpawns.push_back(std::move(pending));
-            } else {
-                SPDLOG_WARN("[HiveShock] dropping spawn '{}' after waiting too long", pending.name);
-            }
-            continue;
-        }
-
-        // Skipped (e.g. no floor found): rotate and retry a few times, then drop.
-        pending.retries++;
-        if (pending.retries < 8) {
-            pending.earliestFrame = gPlayState->gameplayFrames + 1;
-            gPendingSpawns.push_back(std::move(pending));
-        } else {
-            SPDLOG_WARN("[HiveShock] dropping spawn '{}' after retries", pending.name);
+        switch (SpawnDefNow(*def, it->user)) {
+            case ApplyResult::Applied:
+                gPendingSpawns.erase(it);
+                gBacklogDirty = true;
+                gNextSpawnTick = gTick + kSpawnGapFrames;
+                return;
+            case ApplyResult::Deferred:
+                return;
+            case ApplyResult::Held:
+                it->earliestTick = gTick + kHeldRecheckFrames;
+                ++it;
+                break;
+            case ApplyResult::Skipped:
+                // Nothing could be placed this time (no floor, actor limit...). Keep it and try again shortly.
+                if (++it->attempts % 8 == 1) {
+                    SPDLOG_WARN("[HiveShock] could not place '{}' (attempt {}), will retry", it->name, it->attempts);
+                }
+                it->earliestTick = gTick + kFailedRetryFrames;
+                ++it;
+                break;
+            case ApplyResult::Rejected:
+                it = gPendingSpawns.erase(it);
+                gBacklogDirty = true;
+                break;
         }
     }
 }
@@ -1071,8 +1346,7 @@ ApplyResult SpawnNamed(const std::string& name, const std::string& user) {
     if (def == nullptr) {
         return ApplyResult::Skipped;
     }
-    EnqueueEnemySpawn(def->name, user, 0);
-    return ApplyResult::Applied;
+    return EnqueueEnemySpawn(def->name, user, 0) ? ApplyResult::Applied : ApplyResult::Skipped;
 }
 
 ApplyResult SpawnRandomEnemy(const std::string& user) {
@@ -1090,7 +1364,9 @@ ApplyResult SpawnCuccoArmy(const std::string& user) {
     }
     constexpr s32 kCount = 6;
     for (s32 i = 0; i < kCount; i++) {
-        EnqueueEnemySpawn("cucco", user, (u32)(i * kCuccoArmyFrameGap));
+        if (!EnqueueEnemySpawn("cucco", user, (u32)(i * kCuccoArmyFrameGap))) {
+            return ApplyResult::Skipped;
+        }
     }
     return ApplyResult::Applied;
 }
@@ -1527,6 +1803,7 @@ void RequestTelemetrySnapshot() {
     gTelemetry.announced = false;
     gTelemetry.force = true;
     gTelemetry.frame = 0;
+    gQueueReportForce = true;
     SPDLOG_INFO("[HiveShock] telemetry snapshot requested");
 }
 
@@ -1539,6 +1816,9 @@ void RequestQuitGame(const json& cmd) {
     if (save && TelemetryInGame()) {
         SaveManager::Instance->SaveFile(gSaveContext.fileNum);
         SPDLOG_INFO("[HiveShock] game saved before quitting");
+    }
+    if (gBacklogLoaded) {
+        SaveBacklog();
     }
     SPDLOG_INFO("[HiveShock] quit_game requested");
     Ship::Context::GetRawInstance()->GetWindow()->Close();
@@ -1556,15 +1836,10 @@ ApplyResult ApplyCommand(const json& cmd) {
             RequestQuitGame(cmd);
             return ApplyResult::Applied;
         }
-    }
-
-    if (gPlayState == nullptr) {
-        return ApplyResult::Deferred;
-    }
-
-    Player* player = GET_PLAYER(gPlayState);
-    if (player == nullptr) {
-        return ApplyResult::Deferred;
+        if (early == "clear_queue" || early == "clear_pending") {
+            ClearPendingSpawns();
+            return ApplyResult::Applied;
+        }
     }
 
     std::string action = NormalizeActionName(GetStringField(cmd, "action"));
@@ -1589,6 +1864,30 @@ ApplyResult ApplyCommand(const json& cmd) {
         }
     }
 
+    // Spawns go straight to the backlog, whatever Link is doing (cutscene, scene change, dead, title screen). When
+    // and whether they enter the game is decided by TickPendingSpawns, so a spawn that has to wait can never hold
+    // up the commands queued behind it.
+    if (action == "random_enemy" || action == "cucco_army" || FindSpawnDef(action) != nullptr) {
+        LogUser(cmd, action);
+        const std::string spawnUser = TruncateDonorName(GetStringField(cmd, "user"));
+        if (action == "random_enemy") {
+            return SpawnRandomEnemy(spawnUser);
+        }
+        if (action == "cucco_army") {
+            return SpawnCuccoArmy(spawnUser);
+        }
+        return SpawnNamed(action, spawnUser);
+    }
+
+    if (gPlayState == nullptr) {
+        return ApplyResult::Deferred;
+    }
+
+    Player* player = GET_PLAYER(gPlayState);
+    if (player == nullptr) {
+        return ApplyResult::Deferred;
+    }
+
     if (IsSceneChangeInProgress()) {
         return ApplyResult::Deferred;
     }
@@ -1598,7 +1897,6 @@ ApplyResult ApplyCommand(const json& cmd) {
     }
 
     LogUser(cmd, action);
-    std::string user = TruncateDonorName(GetStringField(cmd, "user"));
 
     if (action == "impulse") {
         ApplyImpulse(player, cmd);
@@ -1626,10 +1924,6 @@ ApplyResult ApplyCommand(const json& cmd) {
         FreezeTime(GetDuration(cmd));
     } else if (action == "resume_time") {
         ResumeTime();
-    } else if (action == "random_enemy") {
-        return SpawnRandomEnemy(user);
-    } else if (action == "cucco_army") {
-        return SpawnCuccoArmy(user);
     } else if (action == "blast") {
         ApplyBlast();
     } else if (action == "rupee_rain") {
@@ -1658,8 +1952,6 @@ ApplyResult ApplyCommand(const json& cmd) {
         ApplyDeleteSave();
     } else if (action == "clear_enemies") {
         ClearBridgeEnemies();
-    } else if (FindSpawnDef(action) != nullptr) {
-        return SpawnNamed(action, user);
     } else {
         SPDLOG_WARN("[HiveShock] unknown action '{}'", action);
         return ApplyResult::Skipped;
@@ -1801,6 +2093,9 @@ void StartServer() {
     if (gServerRun.exchange(true)) {
         return;
     }
+    if (!gBacklogLoaded) {
+        LoadBacklog();
+    }
 
     if (gServerThread.joinable()) {
         gServerThread.join();
@@ -1819,8 +2114,13 @@ void StopServer() {
     }
 
     ClearCommandQueue();
-    gPendingSpawns.clear();
-    ResetBridgeActorTracking();
+    // Disabling is deliberate: forget everything that was waiting (and its copy on disk). If the server never ran in
+    // this process the saved backlog is left alone.
+    gTrackedEnemies.clear();
+    if (gBacklogLoaded) {
+        gPendingSpawns.clear();
+        SaveBacklog();
+    }
     gListening = false;
     gClientConnected = false;
 }
@@ -1867,6 +2167,8 @@ static void RegisterHiveShock() {
     }
 
     COND_HOOK(OnGameFrameUpdate, enabled, []() {
+        gTick++;
+
         json cmd;
         while (PopCommand(cmd)) {
             ApplyResult result = ApplyCommand(cmd);
@@ -1879,14 +2181,28 @@ static void RegisterHiveShock() {
         TickTimedEffects();
 
         if (gPlayState == nullptr) {
-            gPendingSpawns.clear();
+            // Title screen / file select: the live enemies are gone, but they and the spawns viewers paid for stay
+            // queued.
+            gLastRoom = -1;
             ResetBridgeActorTracking();
+            TickQueueReport();
+            TickBacklogPersistence();
             return;
         }
 
+        const s16 room = gPlayState->roomCtx.curRoom.num;
+        if (room != gLastRoom) {
+            if (gLastRoom != -1) {
+                gRoomGraceUntilTick = gTick + kRoomGraceTicks;
+            }
+            gLastRoom = room;
+        }
+
+        UpdateTrackedEnemies();
         TickPendingSpawns();
-        PruneTrackedEnemies();
         TickTelemetry();
+        TickQueueReport();
+        TickBacklogPersistence();
 
         if (gPlayState->gameOverCtx.state == GAMEOVER_DEATH_WAIT_GROUND && !gDeathCountedThisCycle) {
             RegisterDeath("player death");
@@ -1906,8 +2222,10 @@ static void RegisterHiveShock() {
         }
     });
 
-    COND_HOOK(OnSceneInit, enabled, [](int16_t /*sceneNum*/) { ResetBridgeActorTracking(); });
-    COND_HOOK(OnTransitionEnd, enabled, [](int16_t /*sceneNum*/) { ResetBridgeActorTracking(); });
+    COND_HOOK(OnSceneInit, enabled, [](int16_t /*sceneNum*/) {
+        gLastRoom = -1;
+        ResetBridgeActorTracking();
+    });
 }
 
 static RegisterShipInitFunc initFunc(RegisterHiveShock, { CVAR_NAME });
