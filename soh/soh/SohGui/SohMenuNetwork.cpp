@@ -241,6 +241,24 @@ void SohMenu::AddMenuNetwork() {
             info.name = "Starting...";
         }
     });
+    AddWidget(path, "Enemy Counter", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
+        info.isHidden = !HiveShock::Instance->IsEnabled();
+        const HiveShock::Stats stats = HiveShock::Instance->GetStats();
+        info.name = "Spawned " + std::to_string(stats.spawned) + " / " + std::to_string(stats.total) +
+                    "  |  Alive " + std::to_string(stats.alive) + "  |  Waiting " + std::to_string(stats.waiting) +
+                    "  |  Defeated " + std::to_string(stats.defeated);
+    });
+    AddWidget(path, "Reset Counter", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip("Starts counting from now. Enemies that are alive or waiting stay counted."))
+        .PreFunc([](WidgetInfo& info) { info.isHidden = !HiveShock::Instance->IsEnabled(); })
+        .Callback([](WidgetInfo& info) { HiveShock::Instance->ResetStats(); });
+    AddWidget(path, "Toggle Enemy Counter Window", WIDGET_WINDOW_BUTTON)
+        .CVar(CVAR_WINDOW("HiveShockCounter"))
+        .RaceDisable(false)
+        .WindowName("HiveShock Counter")
+        .Options(WindowButtonOptions().Tooltip(
+            "Shows a small on-screen counter of the enemies sent through HiveShock: spawned out of the total "
+            "received, alive, waiting in the queue and defeated."));
 
     path.sidebarName = "Anchor";
     AddSidebarEntry("Network", path.sidebarName, 2);

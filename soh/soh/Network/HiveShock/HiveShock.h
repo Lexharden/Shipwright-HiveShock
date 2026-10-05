@@ -11,6 +11,18 @@ class HiveShock {
   public:
     static HiveShock* Instance;
 
+    // Enemy counters for this session (only enemies: fairies and bombchus are not counted).
+    struct Stats {
+        int total = 0;     // received so far (waiting + spawned)
+        int spawned = 0;   // have entered the game
+        int defeated = 0;  // spawned and no longer alive
+        int alive = 0;     // alive right now
+        int waiting = 0;   // still in the queue
+    };
+    Stats GetStats() const;
+    // Starts counting from now: what is alive or waiting stays counted, the rest is forgotten.
+    void ResetStats();
+
     void Enable();
     void Disable();
     bool IsEnabled() const;

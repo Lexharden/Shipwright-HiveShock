@@ -166,6 +166,7 @@ struct PendingSpawn {
     u32 earliestTick = 0; // compared against gTick
     u32 attempts = 0;     // failed placements, only used to throttle logging
     s64 createdAt = 0;    // unix seconds, only used to expire entries restored from disk
+    bool requeued = false; // an enemy that was already counted as spawned and is coming back after a scene change
 };
 
 struct TrackedEnemy {
@@ -186,6 +187,13 @@ std::atomic<bool> gServerRun{ false };
 std::atomic<bool> gListening{ false };
 std::atomic<bool> gClientConnected{ false };
 std::atomic<int> gDeathCount{ 0 };
+
+// Enemy counters shown to the user (see HiveShock::Stats). Written by the game thread, read by the UI.
+std::atomic<int> gStatTotal{ 0 };
+std::atomic<int> gStatSpawned{ 0 };
+std::atomic<int> gStatDefeated{ 0 };
+std::atomic<int> gStatAlive{ 0 };
+std::atomic<int> gStatWaiting{ 0 };
 std::thread gServerThread;
 std::atomic<uint16_t> gPort{ kDefaultPort };
 
@@ -806,6 +814,7 @@ void RequeueFront(const TrackedEnemy& enemy) {
     pending.user = enemy.user;
     pending.earliestTick = gTick;
     pending.createdAt = UnixNow();
+    pending.requeued = true;
     gPendingSpawns.push_front(std::move(pending));
     gBacklogDirty = true;
 }
@@ -838,6 +847,8 @@ void PruneTrackedEnemies() {
         }
         if (inRoomGrace && it->alive) {
             survivors.push_back(std::move(*it));
+        } else {
+            gStatDefeated++;
         }
         it = gTrackedEnemies.erase(it);
     }
@@ -921,6 +932,7 @@ void ResetBridgeActorTracking() {
 
 // Returns false only if the backlog is full, in which case the new spawn is rejected (older ones are kept).
 bool EnqueueEnemySpawn(std::string name, std::string user, u32 delayTicks) {
+    const bool counted = IsTrackedSpawnName(name);
     if (gPendingSpawns.size() >= kMaxPendingSpawns) {
         SPDLOG_WARN("[HiveShock] spawn backlog full ({}), rejecting '{}'", kMaxPendingSpawns, name);
         SendEventToBridge({ { "event", "spawn_rejected" }, { "action", name }, { "user", user } });
@@ -933,6 +945,9 @@ bool EnqueueEnemySpawn(std::string name, std::string user, u32 delayTicks) {
     pending.createdAt = UnixNow();
     gPendingSpawns.push_back(std::move(pending));
     gBacklogDirty = true;
+    if (counted) {
+        gStatTotal++;
+    }
     return true;
 }
 
@@ -1261,6 +1276,9 @@ void LoadBacklog() {
                 continue;
             }
             pending.earliestTick = gTick;
+            if (IsTrackedSpawnName(pending.name)) {
+                gStatTotal++;
+            }
             gPendingSpawns.push_back(std::move(pending));
             restored++;
         }
@@ -1275,6 +1293,21 @@ void TickBacklogPersistence() {
     if (gBacklogDirty && gTick - gLastBacklogSaveTick >= kBacklogSaveTicks) {
         SaveBacklog();
     }
+}
+
+// Keeps the alive / waiting numbers the UI reads up to date. The queue is only walked a few times a second.
+void UpdateStatsSnapshot() {
+    gStatAlive = static_cast<int>(gTrackedEnemies.size());
+    if (gTick % 5 != 0) {
+        return;
+    }
+    int waiting = 0;
+    for (const PendingSpawn& pending : gPendingSpawns) {
+        if (IsTrackedSpawnName(pending.name)) {
+            waiting++;
+        }
+    }
+    gStatWaiting = waiting;
 }
 
 // Tells the companion how many spawns wait and how loaded the game is (only when it changes, at most every ~0.5 s).
@@ -1329,6 +1362,9 @@ void TickPendingSpawns() {
 
         switch (SpawnDefNow(*def, it->user)) {
             case ApplyResult::Applied:
+                if (IsTrackedSpawnName(def->name) && !it->requeued) {
+                    gStatSpawned++;
+                }
                 gPendingSpawns.erase(it);
                 gBacklogDirty = true;
                 gNextSpawnTick = gTick + kSpawnGapFrames;
@@ -2137,6 +2173,7 @@ void StopServer() {
         gPendingSpawns.clear();
         SaveBacklog();
     }
+    gStatTotal = gStatSpawned = gStatDefeated = gStatAlive = gStatWaiting = 0;
     gListening = false;
     gClientConnected = false;
 }
@@ -2173,6 +2210,23 @@ std::string HiveShock::GetListenEndpoint() const {
     return "127.0.0.1:" + std::to_string(gPort.load());
 }
 
+HiveShock::Stats HiveShock::GetStats() const {
+    Stats stats;
+    stats.total = gStatTotal.load();
+    stats.spawned = gStatSpawned.load();
+    stats.defeated = gStatDefeated.load();
+    stats.alive = gStatAlive.load();
+    stats.waiting = gStatWaiting.load();
+    return stats;
+}
+
+void HiveShock::ResetStats() {
+    const int alive = gStatAlive.load();
+    gStatDefeated = 0;
+    gStatSpawned = alive;
+    gStatTotal = alive + gStatWaiting.load();
+}
+
 static void RegisterHiveShock() {
     const bool enabled = CVAR_ENABLED;
 
@@ -2207,6 +2261,7 @@ static void RegisterHiveShock() {
             // queued.
             gLastRoom = -1;
             ResetBridgeActorTracking();
+            UpdateStatsSnapshot();
             TickQueueReport();
             TickBacklogPersistence();
             return;
@@ -2223,6 +2278,7 @@ static void RegisterHiveShock() {
         UpdateTrackedEnemies();
         TickPendingSpawns();
         TickTelemetry();
+        UpdateStatsSnapshot();
         TickQueueReport();
         TickBacklogPersistence();
 
@@ -2281,6 +2337,13 @@ bool HiveShock::HasClient() const {
 
 std::string HiveShock::GetListenEndpoint() const {
     return "";
+}
+
+HiveShock::Stats HiveShock::GetStats() const {
+    return Stats{};
+}
+
+void HiveShock::ResetStats() {
 }
 
 static void RegisterHiveShock() {

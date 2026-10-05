@@ -22,6 +22,7 @@
 #include "soh/Enhancements/TimeDisplay/TimeDisplay.h"
 #include "soh/Enhancements/mod_menu.h"
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/HiveShock/HiveShockWindow.h"
 #include "soh/Enhancements/audio/AudioEditor.h"
 #include "soh/Enhancements/controls/InputViewer.h"
 #include "soh/Enhancements/cosmetics/CosmeticsEditor.h"
@@ -111,6 +112,7 @@ std::shared_ptr<SohModalWindow> mModalWindow;
 std::shared_ptr<Notification::Window> mNotificationWindow;
 std::shared_ptr<TimeDisplayWindow> mTimeDisplayWindow;
 std::shared_ptr<AnchorRoomWindow> mAnchorRoomWindow;
+std::shared_ptr<HiveShockCounterWindow> mHiveShockCounterWindow;
 
 UIWidgets::Colors GetMenuThemeColor() {
     return mSohMenu->GetMenuThemeColor();
@@ -228,6 +230,9 @@ void SetupGuiElements() {
     gui->AddGuiWindow(mTimeDisplayWindow);
     mAnchorRoomWindow = std::make_shared<AnchorRoomWindow>(CVAR_WINDOW("AnchorRoom"), "Anchor Room");
     gui->AddGuiWindow(mAnchorRoomWindow);
+    mHiveShockCounterWindow =
+        std::make_shared<HiveShockCounterWindow>(CVAR_WINDOW("HiveShockCounter"), "HiveShock Counter");
+    gui->AddGuiWindow(mHiveShockCounterWindow);
 }
 
 void Destroy() {
@@ -265,6 +270,7 @@ void Destroy() {
     mPlandomizerWindow = nullptr;
     mTimeDisplayWindow = nullptr;
     mAnchorRoomWindow = nullptr;
+    mHiveShockCounterWindow = nullptr;
 }
 
 void RegisterPopup(std::string title, std::string message, std::string button1, std::string button2,
