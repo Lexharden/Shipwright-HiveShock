@@ -30,6 +30,9 @@ void HiveShockCounterWindow::Draw() {
     ImGui::Text("Alive:    %d", stats.alive);
     ImGui::Text("Waiting:  %d", stats.waiting);
     ImGui::Text("Defeated: %d", stats.defeated);
+    if (stats.eliteBankMax > 0) {
+        ImGui::Text("Elite:    %d / %d  (+%d waiting)", stats.eliteBank, stats.eliteBankMax, stats.eliteWaiting);
+    }
     ImGui::End();
 
     ImGui::PopStyleColor(2);

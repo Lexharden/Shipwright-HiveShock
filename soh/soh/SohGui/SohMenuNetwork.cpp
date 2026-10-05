@@ -241,6 +241,18 @@ void SohMenu::AddMenuNetwork() {
             info.name = "Starting...";
         }
     });
+    AddWidget(path, "Elite Bank: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_REMOTE_HIVESHOCK("EliteReserve"))
+        .Options(IntSliderOptions()
+                     .Min(0)
+                     .Max(40)
+                     .DefaultValue(10)
+                     .Format("%d")
+                     .Tooltip("Points reserved for elite enemies (Iron Knuckle, Dark Link, Stalfos...) on top of the "
+                              "Enemy Load Limit. Elite enemies enter through this bank at once, without waiting for "
+                              "ordinary enemies to be defeated, and never take the last few points of the ordinary "
+                              "limit. When the bank is full they wait for room like anyone else. 0 turns the bank off. "
+                              "The most enemies alive at once becomes the load limit plus this bank."));
     AddWidget(path, "Elite Enemies First", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_REMOTE_HIVESHOCK("ElitePriority"))
         .RaceDisable(false)
@@ -287,6 +299,11 @@ void SohMenu::AddMenuNetwork() {
         info.name = "Spawned " + std::to_string(stats.spawned) + " / " + std::to_string(stats.total) +
                     "  |  Alive " + std::to_string(stats.alive) + "  |  Waiting " + std::to_string(stats.waiting) +
                     "  |  Defeated " + std::to_string(stats.defeated);
+        if (stats.eliteBankMax > 0) {
+            info.name += "  |  Elite bank " + std::to_string(stats.eliteBank) + "/" +
+                         std::to_string(stats.eliteBankMax) + " (" + std::to_string(stats.eliteWaiting) +
+                         " waiting)";
+        }
     });
     AddWidget(path, "Reset Counter", WIDGET_BUTTON)
         .Options(ButtonOptions().Tooltip("Starts counting from now. Enemies that are alive or waiting stay counted."))
