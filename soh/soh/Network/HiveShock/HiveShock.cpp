@@ -20,6 +20,7 @@
 #endif
 
 #include "HiveShock.h"
+#include "HiveShockAdmission.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
 #include "soh/ActorDB.h"
@@ -104,6 +105,16 @@ constexpr u32 kSpawnGapFrames = 8;
 // Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, Floormaster, White Wolfos). Turn off with
 // gRemote.HiveShock.ElitePriority.
 constexpr u8 kEliteWeight = 3;
+// Elite bank: points reserved for elite enemies on top of MaxLoad, so they never have to wait for ordinary enemies to
+// die (gRemote.HiveShock.EliteReserve, 0 turns it off). The ordinary floor is the part of MaxLoad that elite overflow
+// can never take. See HiveShockAdmission.h for the rules.
+constexpr s32 kDefaultEliteReserve = 10;
+constexpr s32 kMaxEliteReserve = 40;
+constexpr s32 kOrdinaryFloor = 4;
+// An elite that has waited this long for room claims the ordinary room that frees up (the ordinary lane pauses until
+// it gets in), so elite enemies past the bank cannot be starved by ordinary ones forever.
+constexpr u32 kEliteClaimTicks = 20 * 20;
+constexpr u32 kEliteWaitLogTicks = 100;
 // Retry cadence for a spawn that is held (not allowed here right now) or that failed to place an actor.
 constexpr u32 kHeldRecheckFrames = 10;
 constexpr u32 kFailedRetryFrames = 20;
@@ -133,10 +144,11 @@ using SocketHandle = int;
 constexpr SocketHandle kInvalidSocket = -1;
 #endif
 
-// Applied: done. Deferred: not possible right now for everybody (budget, cutscene, room load), so stop and retry
-// later. Held: not possible for THIS entry only (a boss room, the Lizalfos mini-boss), so keep it and let others
-// pass. Skipped: failed this time (e.g. no actor could be placed), retry later. Rejected: unknown / invalid command.
-enum class ApplyResult { Applied, Deferred, Held, Skipped, Rejected };
+// Applied: done. Deferred: not possible right now for everybody (cutscene, room load), so stop and retry later.
+// LaneFull: this lane (elite or ordinary) has no room, so stop scanning THAT lane (its first enemy keeps its turn) but
+// let the other one go on. Held: not possible for THIS entry only (a boss room, the Lizalfos mini-boss), so keep it and
+// let others pass. Skipped: failed this time (e.g. no actor could be placed), retry later. Rejected: unknown command.
+enum class ApplyResult { Applied, Deferred, LaneFull, Held, Skipped, Rejected };
 
 enum class BridgeBuff : u8 {
     Speed = 0,
@@ -200,6 +212,9 @@ std::atomic<int> gStatSpawned{ 0 };
 std::atomic<int> gStatDefeated{ 0 };
 std::atomic<int> gStatAlive{ 0 };
 std::atomic<int> gStatWaiting{ 0 };
+std::atomic<int> gStatEliteBank{ 0 };    // elite points in use inside the bank
+std::atomic<int> gStatEliteBankMax{ 0 }; // size of the bank
+std::atomic<int> gStatEliteWaiting{ 0 };
 std::thread gServerThread;
 std::atomic<uint16_t> gPort{ kDefaultPort };
 
@@ -220,6 +235,8 @@ std::vector<TrackedEnemy> gTrackedEnemies;
 // spacing computed from it stay valid across scene changes.
 u32 gTick = 0;
 u32 gNextSpawnTick = 0;
+u32 gEliteWaitSinceTick = 0; // 0 = no elite is waiting for room
+u32 gLastEliteWaitLogTick = 0;
 u32 gRoomGraceUntilTick = 0;
 s16 gLastRoom = -1;
 bool gBacklogDirty = false;
@@ -887,18 +904,50 @@ s32 CurrentLoad() {
     return load;
 }
 
-// True when one more enemy of this weight fits. Nothing is ever killed to make room: if it does not fit, the spawn
-// simply waits until something dies. An enemy heavier than the whole budget is still allowed on its own, so it can
-// never wait forever.
-bool HasRoomFor(const SpawnDef& def) {
+s32 GetEliteReserve() {
+    return std::clamp(CVarGetInteger(CVAR_REMOTE_HIVESHOCK("EliteReserve"), kDefaultEliteReserve), 0, kMaxEliteReserve);
+}
+
+HiveShockAdmission::Lane LaneOf(const SpawnDef& def) {
+    return def.weight >= kEliteWeight ? HiveShockAdmission::Lane::Elite : HiveShockAdmission::Lane::Ordinary;
+}
+
+HiveShockAdmission::Config AdmissionConfig() {
+    return { GetMaxLoad(), GetEliteReserve(), kOrdinaryFloor };
+}
+
+// Load of the live injected enemies split by lane (see HiveShockAdmission.h).
+HiveShockAdmission::Loads CurrentLoads() {
+    HiveShockAdmission::Loads loads{ 0, 0 };
+    for (const TrackedEnemy& t : gTrackedEnemies) {
+        if (t.def != nullptr && t.def->weight >= kEliteWeight) {
+            loads.elite += t.weight;
+        } else {
+            loads.ordinary += t.weight;
+        }
+    }
+    return loads;
+}
+
+// Why one more enemy of this kind cannot enter right now, or nullptr if it fits. Nothing is ever killed to make room:
+// if it does not fit, the spawn simply waits until something dies. Elite enemies have their own bank (and a few
+// reserved slots under the headcount caps), so ordinary enemies filling the pool never block them.
+const char* NoRoomReason(const SpawnDef& def) {
     if (!IsTrackedSpawnName(def.name)) {
-        return CountSceneEnemies() < GetMaxSceneEnemies();
+        return CountSceneEnemies() < GetMaxSceneEnemies() ? nullptr : "the scene has too many enemies";
     }
-    if (CountSceneEnemies() >= GetMaxSceneEnemies() || CountLiveTrackedEnemies() >= static_cast<size_t>(GetMaxAlive())) {
-        return false;
+    const HiveShockAdmission::Lane lane = LaneOf(def);
+    const HiveShockAdmission::Config config = AdmissionConfig();
+    const s32 eliteSlots = HiveShockAdmission::EliteSlots(config.eliteReserve, kEliteWeight);
+    if (!HiveShockAdmission::CanAdmitSlots(lane, static_cast<s32>(CountLiveTrackedEnemies()), CountSceneEnemies(),
+                                           GetMaxAlive(), GetMaxSceneEnemies(), eliteSlots)) {
+        return "too many enemies alive or in the scene";
     }
-    const s32 load = CurrentLoad();
-    return load == 0 || load + def.weight <= GetMaxLoad();
+    if (!HiveShockAdmission::CanAdmit(lane, def.weight, CurrentLoads(), config)) {
+        return lane == HiveShockAdmission::Lane::Elite ? "the elite bank and the free room in the pool are full"
+                                                       : "the load limit is reached";
+    }
+    return nullptr;
 }
 
 void TrackBridgeEnemy(Actor* actor, const SpawnDef& def, const std::string& user) {
@@ -1132,7 +1181,7 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
     return foundFloor;
 }
 
-ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user) {
+ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char** whyBlocked = nullptr) {
     if (gPlayState == nullptr) {
         return ApplyResult::Deferred;
     }
@@ -1151,9 +1200,12 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user) {
     if (def.actorId == ACTOR_EN_ZF && IsLizalfosMinibossActive()) {
         return ApplyResult::Held;
     }
-    // No room in the budget: wait for an enemy to die instead of removing one.
-    if (!HasRoomFor(def)) {
-        return ApplyResult::Deferred;
+    // No room in this lane: wait for an enemy to die instead of removing one.
+    if (const char* noRoom = NoRoomReason(def)) {
+        if (whyBlocked != nullptr) {
+            *whyBlocked = noRoom;
+        }
+        return ApplyResult::LaneFull;
     }
 
     Vec3f pos;
@@ -1346,12 +1398,22 @@ void UpdateStatsSnapshot() {
         return;
     }
     int waiting = 0;
+    int eliteWaiting = 0;
     for (const PendingSpawn& pending : gPendingSpawns) {
         if (IsTrackedSpawnName(pending.name)) {
             waiting++;
+            const SpawnDef* def = FindSpawnDef(pending.name);
+            if (def != nullptr && def->weight >= kEliteWeight) {
+                eliteWaiting++;
+            }
         }
     }
     gStatWaiting = waiting;
+    gStatEliteWaiting = eliteWaiting;
+
+    const s32 reserve = GetEliteReserve();
+    gStatEliteBankMax = reserve;
+    gStatEliteBank = std::min(CurrentLoads().elite, reserve);
 }
 
 // Tells the companion how many spawns wait and how loaded the game is (only when it changes, at most every ~0.5 s).
@@ -1364,7 +1426,10 @@ void TickQueueReport() {
                           { "pending", gPendingSpawns.size() },
                           { "active", gTrackedEnemies.size() },
                           { "load", CurrentLoad() },
-                          { "max", GetMaxLoad() } };
+                          { "max", GetMaxLoad() },
+                          { "eliteLoad", CurrentLoads().elite },
+                          { "eliteReserve", GetEliteReserve() },
+                          { "eliteWaiting", gStatEliteWaiting.load() } };
     const std::string serialized = report.dump();
     if (!gQueueReportForce && serialized == gLastQueueReport) {
         return;
@@ -1387,12 +1452,27 @@ void TickPendingSpawns() {
         return;
     }
 
-    // First in, first out, with the elite enemies first: pass 0 looks only at them, pass 1 at everybody. A spawn that
-    // is blocked for everybody (budget, cutscene, room load) stops the scan, so the enemy at the front keeps its turn
-    // instead of being overtaken by lighter ones (an elite waiting for room therefore holds back the ordinary ones).
-    // A spawn that is only blocked for itself (boss room, Lizalfos mini-boss) is stepped over and kept.
+    // Two lanes. With ElitePriority the elite enemies (own bank, see HiveShockAdmission.h) are looked at first and the
+    // ordinary ones second; without it both go through one FIFO pass. Inside a lane it is first in, first out, and a
+    // full lane stops, so its first enemy keeps its turn, but that does not stop the other lane. A blocker that
+    // affects everybody (cutscene, room load) ends the scan. A spawn that is only blocked for itself (boss room,
+    // Lizalfos mini-boss) is stepped over and kept.
+    using HiveShockAdmission::Lane;
     const bool elitePriority = CVarGetInteger(CVAR_REMOTE_HIVESHOCK("ElitePriority"), 1) != 0;
+    bool laneBlocked[2] = { false, false };
     for (int pass = elitePriority ? 0 : 1; pass < 2; pass++) {
+        if (pass == 1 && elitePriority) {
+            // Aging: an elite that has waited long enough claims the room that frees up in the pool, so the ordinary
+            // lane pauses until it gets in.
+            if (laneBlocked[static_cast<int>(Lane::Elite)]) {
+                if (gTick - gEliteWaitSinceTick >= kEliteClaimTicks) {
+                    return;
+                }
+            } else {
+                gEliteWaitSinceTick = 0;
+            }
+        }
+
         for (auto it = gPendingSpawns.begin(); it != gPendingSpawns.end();) {
             if (gTick < it->earliestTick) {
                 ++it;
@@ -1406,15 +1486,24 @@ void TickPendingSpawns() {
                 gBacklogDirty = true;
                 continue;
             }
-            if (pass == 0 && def->weight < kEliteWeight) {
+            const Lane lane = LaneOf(*def);
+            if (elitePriority && lane != (pass == 0 ? Lane::Elite : Lane::Ordinary)) {
+                ++it;
+                continue;
+            }
+            if (laneBlocked[static_cast<int>(lane)]) {
                 ++it;
                 continue;
             }
 
-            switch (SpawnDefNow(*def, it->user)) {
+            const char* whyBlocked = nullptr;
+            switch (SpawnDefNow(*def, it->user, &whyBlocked)) {
                 case ApplyResult::Applied:
                     if (IsTrackedSpawnName(def->name) && !it->requeued) {
                         gStatSpawned++;
+                    }
+                    if (lane == Lane::Elite) {
+                        gEliteWaitSinceTick = 0;
                     }
                     gPendingSpawns.erase(it);
                     gBacklogDirty = true;
@@ -1422,6 +1511,19 @@ void TickPendingSpawns() {
                     return;
                 case ApplyResult::Deferred:
                     return;
+                case ApplyResult::LaneFull:
+                    laneBlocked[static_cast<int>(lane)] = true;
+                    if (lane == Lane::Elite) {
+                        if (gEliteWaitSinceTick == 0) {
+                            gEliteWaitSinceTick = gTick;
+                        }
+                        if (gTick - gLastEliteWaitLogTick >= kEliteWaitLogTicks) {
+                            gLastEliteWaitLogTick = gTick;
+                            SPDLOG_INFO("[HiveShock] elite '{}' is waiting: {}", it->name, whyBlocked);
+                        }
+                    }
+                    ++it;
+                    break;
                 case ApplyResult::Held:
                     it->earliestTick = gTick + kHeldRecheckFrames;
                     ++it;
@@ -1441,6 +1543,9 @@ void TickPendingSpawns() {
                     break;
             }
         }
+    }
+    if (!laneBlocked[static_cast<int>(Lane::Elite)]) {
+        gEliteWaitSinceTick = 0;
     }
 }
 
@@ -2227,6 +2332,8 @@ void StopServer() {
         SaveBacklog();
     }
     gStatTotal = gStatSpawned = gStatDefeated = gStatAlive = gStatWaiting = 0;
+    gStatEliteBank = gStatEliteBankMax = gStatEliteWaiting = 0;
+    gEliteWaitSinceTick = 0;
     gListening = false;
     gClientConnected = false;
 }
@@ -2270,6 +2377,9 @@ HiveShock::Stats HiveShock::GetStats() const {
     stats.defeated = gStatDefeated.load();
     stats.alive = gStatAlive.load();
     stats.waiting = gStatWaiting.load();
+    stats.eliteBank = gStatEliteBank.load();
+    stats.eliteBankMax = gStatEliteBankMax.load();
+    stats.eliteWaiting = gStatEliteWaiting.load();
     return stats;
 }
 

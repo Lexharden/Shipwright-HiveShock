@@ -18,6 +18,9 @@ class HiveShock {
         int defeated = 0;  // spawned and no longer alive
         int alive = 0;     // alive right now
         int waiting = 0;   // still in the queue
+        int eliteBank = 0;     // elite points in use inside the elite bank
+        int eliteBankMax = 0;  // size of the elite bank (0 = no bank)
+        int eliteWaiting = 0;  // elite enemies still in the queue
     };
     Stats GetStats() const;
     // Starts counting from now: what is alive or waiting stays counted, the rest is forgotten.
