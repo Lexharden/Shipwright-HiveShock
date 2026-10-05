@@ -100,6 +100,10 @@ constexpr s32 kDefaultMaxSceneEnemies = 40;
 constexpr s32 kDefaultMaxLoad = 14;
 // Gameplay runs at 20 frames/s. Spawns are released at most one every ~0.4 s so a refill never arrives as a burst.
 constexpr u32 kSpawnGapFrames = 8;
+// Enemies this heavy or heavier are "elite": they go ahead of the ordinary ones in the queue (Iron Knuckle, Garo Master,
+// Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, Floormaster, White Wolfos). Turn off with
+// gRemote.HiveShock.ElitePriority.
+constexpr u8 kEliteWeight = 3;
 // Retry cadence for a spawn that is held (not allowed here right now) or that failed to place an actor.
 constexpr u32 kHeldRecheckFrames = 10;
 constexpr u32 kFailedRetryFrames = 20;
@@ -1376,50 +1380,59 @@ void TickPendingSpawns() {
         return;
     }
 
-    // First in, first out. A spawn that is blocked for everybody (budget, cutscene, room load) stops the scan, so
-    // a heavy enemy at the front keeps its turn instead of being overtaken by lighter ones. A spawn that is only
-    // blocked for itself (boss room, Lizalfos mini-boss) is stepped over and kept.
-    for (auto it = gPendingSpawns.begin(); it != gPendingSpawns.end();) {
-        if (gTick < it->earliestTick) {
-            ++it;
-            continue;
-        }
-
-        const SpawnDef* def = FindSpawnDef(it->name);
-        if (def == nullptr) {
-            SPDLOG_WARN("[HiveShock] pending spawn unknown '{}', discarding", it->name);
-            it = gPendingSpawns.erase(it);
-            gBacklogDirty = true;
-            continue;
-        }
-
-        switch (SpawnDefNow(*def, it->user)) {
-            case ApplyResult::Applied:
-                if (IsTrackedSpawnName(def->name) && !it->requeued) {
-                    gStatSpawned++;
-                }
-                gPendingSpawns.erase(it);
-                gBacklogDirty = true;
-                gNextSpawnTick = gTick + kSpawnGapFrames;
-                return;
-            case ApplyResult::Deferred:
-                return;
-            case ApplyResult::Held:
-                it->earliestTick = gTick + kHeldRecheckFrames;
+    // First in, first out, with the elite enemies first: pass 0 looks only at them, pass 1 at everybody. A spawn that
+    // is blocked for everybody (budget, cutscene, room load) stops the scan, so the enemy at the front keeps its turn
+    // instead of being overtaken by lighter ones (an elite waiting for room therefore holds back the ordinary ones).
+    // A spawn that is only blocked for itself (boss room, Lizalfos mini-boss) is stepped over and kept.
+    const bool elitePriority = CVarGetInteger(CVAR_REMOTE_HIVESHOCK("ElitePriority"), 1) != 0;
+    for (int pass = elitePriority ? 0 : 1; pass < 2; pass++) {
+        for (auto it = gPendingSpawns.begin(); it != gPendingSpawns.end();) {
+            if (gTick < it->earliestTick) {
                 ++it;
-                break;
-            case ApplyResult::Skipped:
-                // Nothing could be placed this time (no floor, actor limit...). Keep it and try again shortly.
-                if (++it->attempts % 8 == 1) {
-                    SPDLOG_WARN("[HiveShock] could not place '{}' (attempt {}), will retry", it->name, it->attempts);
-                }
-                it->earliestTick = gTick + kFailedRetryFrames;
-                ++it;
-                break;
-            case ApplyResult::Rejected:
+                continue;
+            }
+
+            const SpawnDef* def = FindSpawnDef(it->name);
+            if (def == nullptr) {
+                SPDLOG_WARN("[HiveShock] pending spawn unknown '{}', discarding", it->name);
                 it = gPendingSpawns.erase(it);
                 gBacklogDirty = true;
-                break;
+                continue;
+            }
+            if (pass == 0 && def->weight < kEliteWeight) {
+                ++it;
+                continue;
+            }
+
+            switch (SpawnDefNow(*def, it->user)) {
+                case ApplyResult::Applied:
+                    if (IsTrackedSpawnName(def->name) && !it->requeued) {
+                        gStatSpawned++;
+                    }
+                    gPendingSpawns.erase(it);
+                    gBacklogDirty = true;
+                    gNextSpawnTick = gTick + kSpawnGapFrames;
+                    return;
+                case ApplyResult::Deferred:
+                    return;
+                case ApplyResult::Held:
+                    it->earliestTick = gTick + kHeldRecheckFrames;
+                    ++it;
+                    break;
+                case ApplyResult::Skipped:
+                    // Nothing could be placed this time (no floor, actor limit...). Keep it and try again shortly.
+                    if (++it->attempts % 8 == 1) {
+                        SPDLOG_WARN("[HiveShock] could not place '{}' (attempt {}), will retry", it->name,
+                                    it->attempts);
+                    }
+                    it->earliestTick = gTick + kFailedRetryFrames;
+                    ++it;
+                    break;
+                case ApplyResult::Rejected:
+                    it = gPendingSpawns.erase(it);
+                    gBacklogDirty = true;
+                    break;
+            }
         }
     }
 }

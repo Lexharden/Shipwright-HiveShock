@@ -241,6 +241,13 @@ void SohMenu::AddMenuNetwork() {
             info.name = "Starting...";
         }
     });
+    AddWidget(path, "Elite Enemies First", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_REMOTE_HIVESHOCK("ElitePriority"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Elite enemies (Iron Knuckle, Garo Master, Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, "
+            "Floormaster and White Wolfos) go ahead of the ordinary ones waiting in the queue. They still respect "
+            "the limits below: an elite waits for room like any other, but nothing ordinary is let in before it."));
     AddWidget(path, "Hard Limits (advanced)", WIDGET_SEPARATOR_TEXT);
     AddWidget(path,
               "These two caps protect the game from running out of collision slots (the PC limit is about 150). "
