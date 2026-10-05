@@ -232,8 +232,11 @@ void func_80A74398(Actor* thisx, PlayState* play) {
     Effect_Add(play, &this->blureIdx, EFFECT_BLURE1, 0, 0, &blureInit);
     func_80A74714(this);
 
+    // HiveShock counts too: its Iron Knuckles use params 2/3, whose "switch flag" is 0 and is already set in many
+    // places (e.g. the Fire Temple), which despawned them the instant they appeared.
     uint8_t enemyRandoCCActive = CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
-                                 (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0));
+                                 (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) ||
+                                 (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0));
 
     if (this->switchFlags != 0xFF) {
         // In vanilla gameplay, Iron Knuckles are despawned based on specific flags in specific scenarios.
@@ -669,7 +672,8 @@ void func_80A75A38(EnIk* this, PlayState* play) {
                 // Don't set flag when Enemy Rando or CrowdControl are on.
                 // Instead Iron Knuckles rely on the "clear room" flag.
                 if (this->switchFlags != 0xFF && !CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
-                    !(CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0))) {
+                    !(CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) &&
+                    !(CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0))) {
                     Flags_SetSwitch(play, this->switchFlags);
                 }
                 Actor_Kill(&this->actor);

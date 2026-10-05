@@ -1230,10 +1230,11 @@ void RegisterEnemyRandomizerWidgets() {
     }
 }
 
-// Remove object dependency for Enemy Randomizer and Crowd Control to allow Like-likes to
+// Remove object dependency for Enemy Randomizer, Crowd Control and HiveShock to allow Like-likes to
 // drop equipment correctly in rooms where Like-likes normally don't spawn.
 static void RegisterItem00WithoutObject() {
-    bool required = ENEMY_RANDOMIZER_ENABLED || CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0);
+    bool required = ENEMY_RANDOMIZER_ENABLED || CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0) ||
+                    CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0);
     COND_VB_SHOULD(VB_ITEM00_REQUIRE_OBJECT, required, {
         EnItem00* item = va_arg(args, EnItem00*);
 
@@ -1244,5 +1245,6 @@ static void RegisterItem00WithoutObject() {
 
 static RegisterShipInitFunc initFunc(RegisterEnemyRandomizer, { CVAR_ENEMY_RANDOMIZER_NAME });
 static RegisterShipInitFunc initFuncItem00(RegisterItem00WithoutObject,
-                                           { CVAR_ENEMY_RANDOMIZER_NAME, CVAR_REMOTE_CROWD_CONTROL("Enabled") });
+                                           { CVAR_ENEMY_RANDOMIZER_NAME, CVAR_REMOTE_CROWD_CONTROL("Enabled"),
+                                             CVAR_REMOTE_HIVESHOCK("Enabled") });
 static RegisterMenuInitFunc menuInitFunc(RegisterEnemyRandomizerWidgets);
