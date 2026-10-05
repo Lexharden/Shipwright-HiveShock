@@ -225,7 +225,7 @@ void SohMenu::AddMenuNetwork() {
         .CVar(CVAR_REMOTE_HIVESHOCK("MaxLoad"))
         .Options(IntSliderOptions()
                      .Min(4)
-                     .Max(30)
+                     .Max(100)
                      .DefaultValue(14)
                      .Format("%d")
                      .Tooltip("How many enemies spawned through HiveShock can be alive at once. Each enemy uses "
@@ -241,6 +241,32 @@ void SohMenu::AddMenuNetwork() {
             info.name = "Starting...";
         }
     });
+    AddWidget(path, "Hard Limits (advanced)", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path,
+              "These two caps protect the game from running out of collision slots (the PC limit is about 150). "
+              "Defaults (32 and 40) are safe. Raising them lets many more enemies be alive at once but can lower the "
+              "frame rate or make the game unstable, so raise them gradually and only if you need to. The Enemy Load "
+              "Limit above is still applied first.",
+              WIDGET_TEXT);
+    AddWidget(path, "Max HiveShock Enemies Alive: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_REMOTE_HIVESHOCK("MaxAlive"))
+        .Options(IntSliderOptions()
+                     .Min(8)
+                     .Max(80)
+                     .DefaultValue(32)
+                     .Format("%d")
+                     .Tooltip("Most enemies spawned through HiveShock that can be alive at once, whatever their "
+                              "weight. Default 32. Higher values can hurt performance or stability."));
+    AddWidget(path, "Max Enemies In The Scene: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_REMOTE_HIVESHOCK("MaxSceneEnemies"))
+        .Options(IntSliderOptions()
+                     .Min(16)
+                     .Max(100)
+                     .DefaultValue(40)
+                     .Format("%d")
+                     .Tooltip("Most enemies allowed in the scene in total, counting the game's own. Default 40. "
+                              "Spawns wait while the scene is at this number. Higher values can hurt performance or "
+                              "stability."));
     AddWidget(path, "Defeat Alive Enemies When Link Dies", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_REMOTE_HIVESHOCK("DefeatOnDeath"))
         .RaceDisable(false)

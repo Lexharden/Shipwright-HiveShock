@@ -93,8 +93,9 @@ constexpr s16 kMinHealthAfterDamage = 4;
 constexpr float kDefaultShockDamage = 8.0f;
 // Hard engine limits (PC collider lists are 150/180/150; keep a margin for the scene + Link). Reaching them delays
 // spawns, it never removes an enemy.
-constexpr s32 kMaxBridgeEnemies = 32;
-constexpr s32 kMaxSceneEnemies = 40;
+// The player can raise them in Network > HiveShock (gRemote.HiveShock.MaxAlive / MaxSceneEnemies).
+constexpr s32 kDefaultMaxAlive = 32;
+constexpr s32 kDefaultMaxSceneEnemies = 40;
 // Soft budget: sum of SpawnDef::weight of the live injected enemies. Configurable with gRemote.HiveShock.MaxLoad.
 constexpr s32 kDefaultMaxLoad = 14;
 // Gameplay runs at 20 frames/s. Spawns are released at most one every ~0.4 s so a refill never arrives as a burst.
@@ -861,6 +862,14 @@ size_t CountLiveTrackedEnemies() {
     return gTrackedEnemies.size();
 }
 
+s32 GetMaxAlive() {
+    return std::max(1, CVarGetInteger(CVAR_REMOTE_HIVESHOCK("MaxAlive"), kDefaultMaxAlive));
+}
+
+s32 GetMaxSceneEnemies() {
+    return std::max(1, CVarGetInteger(CVAR_REMOTE_HIVESHOCK("MaxSceneEnemies"), kDefaultMaxSceneEnemies));
+}
+
 s32 GetMaxLoad() {
     return std::max(1, CVarGetInteger(CVAR_REMOTE_HIVESHOCK("MaxLoad"), kDefaultMaxLoad));
 }
@@ -879,9 +888,9 @@ s32 CurrentLoad() {
 // never wait forever.
 bool HasRoomFor(const SpawnDef& def) {
     if (!IsTrackedSpawnName(def.name)) {
-        return CountSceneEnemies() < kMaxSceneEnemies;
+        return CountSceneEnemies() < GetMaxSceneEnemies();
     }
-    if (CountSceneEnemies() >= kMaxSceneEnemies || CountLiveTrackedEnemies() >= kMaxBridgeEnemies) {
+    if (CountSceneEnemies() >= GetMaxSceneEnemies() || CountLiveTrackedEnemies() >= static_cast<size_t>(GetMaxAlive())) {
         return false;
     }
     const s32 load = CurrentLoad();
