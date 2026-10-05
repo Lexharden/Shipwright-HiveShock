@@ -105,15 +105,13 @@ constexpr u32 kSpawnGapFrames = 8;
 // Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, Floormaster, White Wolfos). Turn off with
 // gRemote.HiveShock.ElitePriority.
 constexpr u8 kEliteWeight = 3;
-// Elite bank: points reserved for elite enemies on top of MaxLoad, so they never have to wait for ordinary enemies to
-// die (gRemote.HiveShock.EliteReserve, 0 turns it off). The ordinary floor is the part of MaxLoad that elite overflow
-// can never take. See HiveShockAdmission.h for the rules.
+// Elite head start: points reserved for elite enemies on top of MaxLoad, so the first ones enter at once
+// (gRemote.HiveShock.EliteReserve, 0 turns it off). It is only a head start, not a ceiling: elites can also use the
+// whole ordinary pool, and while one waits for room, the room that frees up as ordinary enemies die is reserved for
+// it (the ordinary lane pauses), piling up kill after kill until it fits. See HiveShockAdmission.h for the rules.
 constexpr s32 kDefaultEliteReserve = 10;
 constexpr s32 kMaxEliteReserve = 40;
-constexpr s32 kOrdinaryFloor = 4;
-// An elite that has waited this long for room claims the ordinary room that frees up (the ordinary lane pauses until
-// it gets in), so elite enemies past the bank cannot be starved by ordinary ones forever.
-constexpr u32 kEliteClaimTicks = 20 * 20;
+constexpr s32 kOrdinaryFloor = 0;
 constexpr u32 kEliteWaitLogTicks = 100;
 // Retry cadence for a spawn that is held (not allowed here right now) or that failed to place an actor.
 constexpr u32 kHeldRecheckFrames = 10;
@@ -235,7 +233,6 @@ std::vector<TrackedEnemy> gTrackedEnemies;
 // spacing computed from it stay valid across scene changes.
 u32 gTick = 0;
 u32 gNextSpawnTick = 0;
-u32 gEliteWaitSinceTick = 0; // 0 = no elite is waiting for room
 u32 gLastEliteWaitLogTick = 0;
 u32 gRoomGraceUntilTick = 0;
 s16 gLastRoom = -1;
@@ -1452,25 +1449,19 @@ void TickPendingSpawns() {
         return;
     }
 
-    // Two lanes. With ElitePriority the elite enemies (own bank, see HiveShockAdmission.h) are looked at first and the
-    // ordinary ones second; without it both go through one FIFO pass. Inside a lane it is first in, first out, and a
-    // full lane stops, so its first enemy keeps its turn, but that does not stop the other lane. A blocker that
-    // affects everybody (cutscene, room load) ends the scan. A spawn that is only blocked for itself (boss room,
-    // Lizalfos mini-boss) is stepped over and kept.
+    // Two lanes. With ElitePriority the elite enemies (head-start bank, see HiveShockAdmission.h) are looked at first
+    // and the ordinary ones second; without it both go through one FIFO pass. Inside a lane it is first in, first
+    // out, and a full lane stops, so its first enemy keeps its turn. When an elite has no room, the ordinary lane
+    // pauses too: every point that frees up as ordinary enemies die is reserved for the elite, piling up kill after
+    // kill until it fits, instead of being refilled by the next wolf. A blocker that affects everybody (cutscene,
+    // room load) ends the scan. A spawn that is only blocked for itself (boss room, Lizalfos mini-boss) is stepped
+    // over and kept.
     using HiveShockAdmission::Lane;
     const bool elitePriority = CVarGetInteger(CVAR_REMOTE_HIVESHOCK("ElitePriority"), 1) != 0;
     bool laneBlocked[2] = { false, false };
     for (int pass = elitePriority ? 0 : 1; pass < 2; pass++) {
-        if (pass == 1 && elitePriority) {
-            // Aging: an elite that has waited long enough claims the room that frees up in the pool, so the ordinary
-            // lane pauses until it gets in.
-            if (laneBlocked[static_cast<int>(Lane::Elite)]) {
-                if (gTick - gEliteWaitSinceTick >= kEliteClaimTicks) {
-                    return;
-                }
-            } else {
-                gEliteWaitSinceTick = 0;
-            }
+        if (pass == 1 && elitePriority && laneBlocked[static_cast<int>(Lane::Elite)]) {
+            return; // the freed room belongs to the waiting elite
         }
 
         for (auto it = gPendingSpawns.begin(); it != gPendingSpawns.end();) {
@@ -1502,9 +1493,6 @@ void TickPendingSpawns() {
                     if (IsTrackedSpawnName(def->name) && !it->requeued) {
                         gStatSpawned++;
                     }
-                    if (lane == Lane::Elite) {
-                        gEliteWaitSinceTick = 0;
-                    }
                     gPendingSpawns.erase(it);
                     gBacklogDirty = true;
                     gNextSpawnTick = gTick + kSpawnGapFrames;
@@ -1513,14 +1501,10 @@ void TickPendingSpawns() {
                     return;
                 case ApplyResult::LaneFull:
                     laneBlocked[static_cast<int>(lane)] = true;
-                    if (lane == Lane::Elite) {
-                        if (gEliteWaitSinceTick == 0) {
-                            gEliteWaitSinceTick = gTick;
-                        }
-                        if (gTick - gLastEliteWaitLogTick >= kEliteWaitLogTicks) {
-                            gLastEliteWaitLogTick = gTick;
-                            SPDLOG_INFO("[HiveShock] elite '{}' is waiting: {}", it->name, whyBlocked);
-                        }
+                    if (lane == Lane::Elite && gTick - gLastEliteWaitLogTick >= kEliteWaitLogTicks) {
+                        gLastEliteWaitLogTick = gTick;
+                        SPDLOG_INFO("[HiveShock] elite '{}' is waiting, freed room is reserved for it: {}", it->name,
+                                    whyBlocked);
                     }
                     ++it;
                     break;
@@ -1543,9 +1527,6 @@ void TickPendingSpawns() {
                     break;
             }
         }
-    }
-    if (!laneBlocked[static_cast<int>(Lane::Elite)]) {
-        gEliteWaitSinceTick = 0;
     }
 }
 
@@ -2333,7 +2314,6 @@ void StopServer() {
     }
     gStatTotal = gStatSpawned = gStatDefeated = gStatAlive = gStatWaiting = 0;
     gStatEliteBank = gStatEliteBankMax = gStatEliteWaiting = 0;
-    gEliteWaitSinceTick = 0;
     gListening = false;
     gClientConnected = false;
 }

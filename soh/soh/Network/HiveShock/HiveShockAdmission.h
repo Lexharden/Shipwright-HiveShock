@@ -3,9 +3,11 @@
 // HiveShock spawn admission rules, kept as pure constexpr functions (no game state) so they can be checked at
 // compile time with the static_asserts at the bottom.
 //
-// Two lanes share the game: ordinary enemies use the "pool" (MaxLoad points); elite enemies have a bank of their own
-// (eliteReserve points, on top of the pool). When the bank is full an elite may overflow ("spill") into the pool's
-// free room, but never into the last `ordinaryFloor` points, so ordinary enemies cannot be starved by elites.
+// Two lanes share the game: ordinary enemies use the "pool" (MaxLoad points); elite enemies get a head start of their
+// own (eliteReserve points, on top of the pool) so the first ones never wait. The bank is not a ceiling: when it is
+// full an elite may overflow ("spill") into the pool's free room, down to the last `ordinaryFloor` points (0 = the
+// whole pool). The caller adds the other half of the policy: while an elite waits, the room that frees up as ordinary
+// enemies die is reserved for it, so it accumulates kill after kill until the elite fits.
 //
 // Nothing here ever removes an enemy: when a lane has no room the spawn simply waits.
 
@@ -16,7 +18,7 @@ enum class Lane { Ordinary, Elite };
 struct Config {
     int maxLoad;       // ordinary pool, in weight points
     int eliteReserve;  // elite bank, in weight points, on top of maxLoad. 0 = no bank (everyone shares the pool)
-    int ordinaryFloor; // points of the pool that elite overflow can never take
+    int ordinaryFloor; // points of the pool that elite overflow can never take (0 = elites may use all of it)
 };
 
 struct Loads {
@@ -38,9 +40,9 @@ constexpr int PoolUsed(const Loads& loads, const Config& config) {
     return loads.ordinary + Spill(loads, config);
 }
 
-// The floor only exists when there is a bank, and never takes more than half of a small pool.
+// The floor never takes more than half of a small pool.
 constexpr int EffectiveFloor(const Config& config) {
-    return config.eliteReserve <= 0 ? 0 : (config.ordinaryFloor < config.maxLoad / 2 ? config.ordinaryFloor : config.maxLoad / 2);
+    return config.ordinaryFloor < config.maxLoad / 2 ? config.ordinaryFloor : config.maxLoad / 2;
 }
 
 // True when an enemy of this weight fits in its lane right now. An enemy that would not fit even in an empty game
@@ -72,20 +74,28 @@ constexpr bool CanAdmitSlots(Lane lane, int alive, int inScene, int maxAlive, in
     return alive < Max(1, maxAlive - slots) && inScene < Max(1, maxScene - slots);
 }
 
-// ---- Checks (MaxLoad 14, elite bank 10, floor 4) -----------------------------------------------------------------
+// ---- Checks (MaxLoad 14, elite bank 10, no floor) ---------------------------------------------------------------
 namespace Checks {
-constexpr Config kBank{ 14, 10, 4 };
-constexpr Config kNoBank{ 14, 0, 4 };
+constexpr Config kBank{ 14, 10, 0 };
+constexpr Config kNoBank{ 14, 0, 0 };
+constexpr Config kFloor{ 14, 10, 4 };
 
 // Seven wolves fill the ordinary pool, yet the first two Iron Knuckles (4 points each) enter at once...
 static_assert(CanAdmit(Lane::Elite, 4, Loads{ 14, 0 }, kBank));
 static_assert(CanAdmit(Lane::Elite, 4, Loads{ 14, 4 }, kBank));
 // ...the third does not fit in the bank (12 > 10) and the pool has no room for its overflow, so it waits.
 static_assert(!CanAdmit(Lane::Elite, 4, Loads{ 14, 8 }, kBank));
-// When wolves die and the pool has room again, it enters through the overflow.
-static_assert(CanAdmit(Lane::Elite, 4, Loads{ 8, 8 }, kBank));
-// But overflow never eats the ordinary floor (4 points).
-static_assert(!CanAdmit(Lane::Elite, 4, Loads{ 9, 8 }, kBank));
+// The room that frees up as enemies die is reserved for the waiting elite and piles up kill after kill: after a
+// 1-point kill it still does not fit (13 + 2 > 14), after a second one it does (12 + 2 <= 14). No need to kill several
+// enemies "at once", and no other enemy takes the room in between.
+static_assert(!CanAdmit(Lane::Elite, 4, Loads{ 13, 8 }, kBank));
+static_assert(CanAdmit(Lane::Elite, 4, Loads{ 12, 8 }, kBank));
+// The bank is not a ceiling: with it full, elites keep coming in as long as the pool has room.
+static_assert(CanAdmit(Lane::Elite, 4, Loads{ 8, 10 }, kBank));
+static_assert(CanAdmit(Lane::Elite, 4, Loads{ 2, 16 }, kBank));
+// A configurable floor still protects the last points of the ordinary pool.
+static_assert(!CanAdmit(Lane::Elite, 4, Loads{ 9, 8 }, kFloor));
+static_assert(CanAdmit(Lane::Elite, 4, Loads{ 8, 8 }, kFloor));
 // Ordinary enemies are not affected by a full bank...
 static_assert(CanAdmit(Lane::Ordinary, 2, Loads{ 12, 10 }, kBank));
 // ...and still cannot exceed their own pool.

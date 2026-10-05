@@ -241,18 +241,19 @@ void SohMenu::AddMenuNetwork() {
             info.name = "Starting...";
         }
     });
-    AddWidget(path, "Elite Bank: %d", WIDGET_CVAR_SLIDER_INT)
+    AddWidget(path, "Elite Head Start: %d", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_REMOTE_HIVESHOCK("EliteReserve"))
         .Options(IntSliderOptions()
                      .Min(0)
                      .Max(40)
                      .DefaultValue(10)
                      .Format("%d")
-                     .Tooltip("Points reserved for elite enemies (Iron Knuckle, Dark Link, Stalfos...) on top of the "
-                              "Enemy Load Limit. Elite enemies enter through this bank at once, without waiting for "
-                              "ordinary enemies to be defeated, and never take the last few points of the ordinary "
-                              "limit. When the bank is full they wait for room like anyone else. 0 turns the bank off. "
-                              "The most enemies alive at once becomes the load limit plus this bank."));
+                     .Tooltip("Points on top of the Enemy Load Limit that only elite enemies (Iron Knuckle, Dark "
+                              "Link, Stalfos...) can use, so the first ones enter at once without waiting for "
+                              "ordinary enemies to be defeated. It is not a ceiling: elites can also use the ordinary "
+                              "limit, and while an elite waits, the room that frees up as ordinary enemies are "
+                              "defeated is reserved for it (no new ordinary enemy enters) until it fits. 0 turns the "
+                              "head start off."));
     AddWidget(path, "Elite Enemies First", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_REMOTE_HIVESHOCK("ElitePriority"))
         .RaceDisable(false)
@@ -300,7 +301,7 @@ void SohMenu::AddMenuNetwork() {
                     "  |  Alive " + std::to_string(stats.alive) + "  |  Waiting " + std::to_string(stats.waiting) +
                     "  |  Defeated " + std::to_string(stats.defeated);
         if (stats.eliteBankMax > 0) {
-            info.name += "  |  Elite bank " + std::to_string(stats.eliteBank) + "/" +
+            info.name += "  |  Elite head start " + std::to_string(stats.eliteBank) + "/" +
                          std::to_string(stats.eliteBankMax) + " (" + std::to_string(stats.eliteWaiting) +
                          " waiting)";
         }
