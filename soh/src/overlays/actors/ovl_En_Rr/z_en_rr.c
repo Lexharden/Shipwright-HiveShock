@@ -8,6 +8,8 @@
 #include "objects/object_rr/object_rr.h"
 #include "vt.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include <libultraship/bridge/consolevariablebridge.h>
+#include "soh/cvar_prefixes.h"
 #include <assert.h>
 
 #define FLAGS                                                                                 \
@@ -202,9 +204,32 @@ void EnRr_Init(Actor* thisx, PlayState* play2) {
     EnRr_InitBodySegments(this, play);
 }
 
+// HiveShock: the Like-Like gives back the shield it ate whenever it is gone, however it goes: killed by damage,
+// removed by clear_enemies, Link dying, a scene change... In vanilla it only drops the shield in its death animation,
+// so removing it any other way lost the shield for good. The shield goes straight back to Link (owned and, if he holds
+// none, equipped) instead of as a pickup that could be missed or despawn.
+static void EnRr_ReturnEatenShield(EnRr* this, PlayState* play, s32 refreshPlayer) {
+    if (this->eatenShield == 0 || !CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0)) {
+        return;
+    }
+
+    gSaveContext.inventory.equipment |= OWNED_EQUIP_FLAG(EQUIP_TYPE_SHIELD, this->eatenShield - 1);
+    if (CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD) == EQUIP_VALUE_SHIELD_NONE) {
+        Inventory_ChangeEquipment(EQUIP_TYPE_SHIELD, this->eatenShield);
+        // Not while the scene is being torn down: Link may already be gone, and he reads his equipment again when
+        // he is created.
+        if (refreshPlayer) {
+            Player_SetEquipmentData(play, GET_PLAYER(play));
+        }
+    }
+    this->eatenShield = 0;
+}
+
 void EnRr_Destroy(Actor* thisx, PlayState* play) {
     s32 pad;
     EnRr* this = (EnRr*)thisx;
+
+    EnRr_ReturnEatenShield(this, play, false);
 
     Collider_DestroyCylinder(play, &this->collider1);
     Collider_DestroyCylinder(play, &this->collider2);
@@ -671,6 +696,7 @@ void EnRr_Death(EnRr* this, PlayState* play) {
         dropPos.x = this->actor.world.pos.x;
         dropPos.y = this->actor.world.pos.y;
         dropPos.z = this->actor.world.pos.z;
+        EnRr_ReturnEatenShield(this, play, true); // with HiveShock on, nothing is left to drop
         switch (this->eatenShield) {
             case 1:
                 Item_DropCollectible(play, &dropPos, ITEM00_SHIELD_DEKU);
