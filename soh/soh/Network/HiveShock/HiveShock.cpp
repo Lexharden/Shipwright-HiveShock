@@ -213,7 +213,18 @@ std::atomic<int> gStatWaiting{ 0 };
 std::atomic<int> gStatEliteBank{ 0 };    // elite points in use inside the bank
 std::atomic<int> gStatEliteBankMax{ 0 }; // size of the bank
 std::atomic<int> gStatEliteWaiting{ 0 };
-std::thread gServerThread;
+// Joins the server thread on destruction. A joinable std::thread destroyed during static teardown calls
+// std::terminate(), which aborted the game on exit whenever HiveShock was still enabled.
+struct ServerThreadHolder {
+    std::thread thread;
+    ~ServerThreadHolder() {
+        gServerRun = false;
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+};
+ServerThreadHolder gServerThreadHolder;
 std::atomic<uint16_t> gPort{ kDefaultPort };
 
 bool gDeathCountedThisCycle = false;
@@ -471,6 +482,33 @@ bool WaitForSocket(SocketHandle sock, bool forRead, int timeoutMs) {
     pfd.fd = sock;
     pfd.events = forRead ? POLLIN : POLLOUT;
     return poll(&pfd, 1, timeoutMs) > 0;
+#endif
+}
+
+// Polls two sockets for readability. Returns a bitmask: 1 = a readable, 2 = b readable.
+int WaitForEitherReadable(SocketHandle a, SocketHandle b, int timeoutMs) {
+#ifdef _WIN32
+    WSAPOLLFD fds[2]{};
+    fds[0].fd = a;
+    fds[0].events = POLLRDNORM;
+    fds[1].fd = b;
+    fds[1].events = POLLRDNORM;
+    if (WSAPoll(fds, 2, timeoutMs) <= 0) {
+        return 0;
+    }
+    return ((fds[0].revents & (POLLRDNORM | POLLHUP | POLLERR)) ? 1 : 0) |
+           ((fds[1].revents & (POLLRDNORM | POLLHUP | POLLERR)) ? 2 : 0);
+#else
+    pollfd fds[2]{};
+    fds[0].fd = a;
+    fds[0].events = POLLIN;
+    fds[1].fd = b;
+    fds[1].events = POLLIN;
+    if (poll(fds, 2, timeoutMs) <= 0) {
+        return 0;
+    }
+    return ((fds[0].revents & (POLLIN | POLLHUP | POLLERR)) ? 1 : 0) |
+           ((fds[1].revents & (POLLIN | POLLHUP | POLLERR)) ? 2 : 0);
 #endif
 }
 
@@ -2149,16 +2187,40 @@ ApplyResult ApplyCommand(const json& cmd) {
     return ApplyResult::Applied;
 }
 
-void HandleClient(SocketHandle clientSocket) {
+void HandleClient(SocketHandle clientSocket, SocketHandle listenSocket) {
     SPDLOG_INFO("[HiveShock] client connected");
     gClientConnected = true;
     ConfigureSocket(clientSocket);
     std::string buffer;
     char recvBuf[1024];
 
+    auto handleLine = [](std::string line) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            return;
+        }
+        if (line.size() > kMaxLineBytes) {
+            SPDLOG_WARN("[HiveShock] dropping oversized JSON line ({} bytes)", line.size());
+            return;
+        }
+        try {
+            json parsed = json::parse(line);
+            SPDLOG_INFO("[HiveShock] received '{}'", GetStringField(parsed, "action"));
+            PushCommand(std::move(parsed));
+        } catch (const std::exception& e) { SPDLOG_WARN("[HiveShock] invalid JSON: {}", e.what()); }
+    };
+
     while (gServerRun.load()) {
         // Wake up periodically so Disable() never has to interrupt a blocking recv().
-        if (!WaitForSocket(clientSocket, true, kPollIntervalMs)) {
+        const int ready = WaitForEitherReadable(clientSocket, listenSocket, kPollIntervalMs);
+        if (ready & 2) {
+            // A new client is waiting: drop this one (it may be stale) so the new connection isn't starved.
+            SPDLOG_INFO("[HiveShock] new connection pending, replacing current client");
+            break;
+        }
+        if (!(ready & 1)) {
             continue;
         }
 
@@ -2179,23 +2241,7 @@ void HandleClient(SocketHandle clientSocket) {
         while ((newlinePos = buffer.find('\n')) != std::string::npos) {
             std::string line = buffer.substr(0, newlinePos);
             buffer.erase(0, newlinePos + 1);
-
-            if (!line.empty() && line.back() == '\r') {
-                line.pop_back();
-            }
-            if (line.empty()) {
-                continue;
-            }
-            if (line.size() > kMaxLineBytes) {
-                SPDLOG_WARN("[HiveShock] dropping oversized JSON line ({} bytes)", line.size());
-                continue;
-            }
-
-            try {
-                json parsed = json::parse(line);
-                SPDLOG_INFO("[HiveShock] received '{}'", GetStringField(parsed, "action"));
-                PushCommand(std::move(parsed));
-            } catch (const std::exception& e) { SPDLOG_WARN("[HiveShock] invalid JSON: {}", e.what()); }
+            handleLine(std::move(line));
         }
 
         // A peer that never sends a newline must not grow the buffer without bound.
@@ -2203,6 +2249,11 @@ void HandleClient(SocketHandle clientSocket) {
             SPDLOG_WARN("[HiveShock] dropping oversized line without newline ({} bytes)", buffer.size());
             buffer.clear();
         }
+    }
+
+    // Some clients send one JSON object and close without a trailing newline: don't lose it.
+    if (!buffer.empty()) {
+        handleLine(std::move(buffer));
     }
 
     CloseSocket(clientSocket);
@@ -2269,7 +2320,7 @@ void RunServer(uint16_t port) {
             SPDLOG_ERROR("[HiveShock] accept() failed ({})", LastSocketError());
             break;
         }
-        HandleClient(clientSocket);
+        HandleClient(clientSocket, listenSocket);
     }
 
     gListening = false;
@@ -2288,20 +2339,20 @@ void StartServer() {
         LoadBacklog();
     }
 
-    if (gServerThread.joinable()) {
-        gServerThread.join();
+    if (gServerThreadHolder.thread.joinable()) {
+        gServerThreadHolder.thread.join();
     }
     const auto port =
         static_cast<uint16_t>(std::clamp(CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Port"), kDefaultPort), 1025, 65534));
     gPort = port;
-    gServerThread = std::thread(RunServer, port);
+    gServerThreadHolder.thread = std::thread(RunServer, port);
 }
 
 void StopServer() {
     gServerRun = false;
     // Every blocking call in the server thread polls with a timeout, so this returns promptly.
-    if (gServerThread.joinable()) {
-        gServerThread.join();
+    if (gServerThreadHolder.thread.joinable()) {
+        gServerThreadHolder.thread.join();
     }
 
     ClearCommandQueue();
