@@ -537,6 +537,20 @@ bool IsSceneChangeInProgress() {
     return false;
 }
 
+// Why the command at the front of the queue cannot run yet, for the log. A deferred command is otherwise silent.
+const char* DeferReason() {
+    if (gPlayState == nullptr) {
+        return "no scene loaded (title screen / file select)";
+    }
+    if (IsSceneChangeInProgress()) {
+        return "scene change in progress or Link is dead";
+    }
+    if (!GameInteractor::IsPlayerInControl()) {
+        return "Link is not in control (cutscene, menu, text box or paused)";
+    }
+    return "waiting for a safe moment";
+}
+
 bool ShouldDeferDangerousEffects() {
     return !GameInteractor::IsPlayerInControl() || IsSceneChangeInProgress();
 }
@@ -2003,7 +2017,9 @@ void HandleClient(SocketHandle clientSocket) {
             }
 
             try {
-                PushCommand(json::parse(line));
+                json parsed = json::parse(line);
+                SPDLOG_INFO("[HiveShock] received '{}'", GetStringField(parsed, "action"));
+                PushCommand(std::move(parsed));
             } catch (const std::exception& e) { SPDLOG_WARN("[HiveShock] invalid JSON: {}", e.what()); }
         }
 
@@ -2173,6 +2189,12 @@ static void RegisterHiveShock() {
         while (PopCommand(cmd)) {
             ApplyResult result = ApplyCommand(cmd);
             if (result == ApplyResult::Deferred) {
+                // Throttled: this runs every frame while the command waits.
+                static u32 sLastDeferLogTick = 0;
+                if (gTick - sLastDeferLogTick >= 40) {
+                    sLastDeferLogTick = gTick;
+                    SPDLOG_INFO("[HiveShock] '{}' is waiting: {}", GetStringField(cmd, "action"), DeferReason());
+                }
                 PushCommandFront(std::move(cmd));
                 break;
             }
