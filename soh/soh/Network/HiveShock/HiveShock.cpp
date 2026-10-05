@@ -1068,22 +1068,29 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
     // used to return Deferred forever and stall the whole pending spawn queue.
     pos = player->actor.world.pos;
     bool foundFloor = false;
-    // Some enemies only wake up when Link is within a short range (Stalchild: 60 units, Redead/Gibdo: 150),
-    // so spawn those closer to have them attack right away.
-    f32 radii[] = { 80.0f, 120.0f, 40.0f, 160.0f };
+    // How far from Link the enemy appears, in order of preference (the first distance with floor wins; the last
+    // entries are close fallbacks for small rooms). Some enemies only wake up when Link is within a short range
+    // (Stalchild: 60 units, Redead/Gibdo: 150), so they spawn close. The big ones (elite) start a bit further away,
+    // at a fairer distance, and walk up to Link by themselves: they sense him from 200 units or more.
+    static constexpr f32 kRadiiDefault[] = { 80.0f, 120.0f, 40.0f, 160.0f };
+    static constexpr f32 kRadiiStalchild[] = { 45.0f, 35.0f, 50.0f, 30.0f };
+    static constexpr f32 kRadiiRedead[] = { 135.0f, 115.0f, 150.0f, 100.0f, 80.0f };
+    static constexpr f32 kRadiiElite[] = { 200.0f, 240.0f, 160.0f, 280.0f, 120.0f, 80.0f };
+    const f32* radii = kRadiiDefault;
+    size_t radiiCount = ARRAY_COUNT(kRadiiDefault);
     if (def.actorId == ACTOR_EN_SKB) {
-        radii[0] = 45.0f;
-        radii[1] = 35.0f;
-        radii[2] = 50.0f;
-        radii[3] = 30.0f;
+        radii = kRadiiStalchild;
+        radiiCount = ARRAY_COUNT(kRadiiStalchild);
     } else if (def.actorId == ACTOR_EN_RD) {
-        radii[0] = 90.0f;
-        radii[1] = 120.0f;
-        radii[2] = 60.0f;
-        radii[3] = 130.0f;
+        radii = kRadiiRedead;
+        radiiCount = ARRAY_COUNT(kRadiiRedead);
+    } else if (def.weight >= kEliteWeight) {
+        radii = kRadiiElite;
+        radiiCount = ARRAY_COUNT(kRadiiElite);
     }
     const s16 yawBase = player->actor.shape.rot.y; // in front of Link
-    for (f32 radius : radii) {
+    for (size_t r = 0; r < radiiCount && !foundFloor; r++) {
+        const f32 radius = radii[r];
         for (s32 i = 0; i < 8 && !foundFloor; i++) {
             s16 yaw = yawBase + (s16)(i * 0x2000);
             Vec3f candidate;
