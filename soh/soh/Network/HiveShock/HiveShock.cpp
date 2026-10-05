@@ -28,6 +28,7 @@
 #include "soh/SaveManager.h"
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
+#include "overlays/actors/ovl_En_Elf/z_en_elf.h"
 #include "overlays/actors/ovl_En_Niw/z_en_niw.h"
 
 #include <nlohmann/json.hpp>
@@ -254,7 +255,8 @@ constexpr SpawnDef kSpawnTable[] = {
     { "eyegore", ACTOR_EN_IK, 2, false, 4 },
     { "dark_link", ACTOR_EN_TORCH2, 0, false, 4 },
     { "arwing", ACTOR_EN_CLEAR_TAG, 1, false, 2 },
-    { "fairy", ACTOR_EN_ELF, 0, true, 0 },
+    // ACTOR_EN_ELF is Navi with params 0; FAIRY_HEAL is the healing fairy (touching it restores 8 hearts).
+    { "fairy", ACTOR_EN_ELF, FAIRY_HEAL, true, 0 },
     { "bombchu", ACTOR_EN_BOM_CHU, 0, true, 0 },
 };
 
@@ -1102,6 +1104,10 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
     }
     if (def.actorId == ACTOR_EN_NIW) {
         pos.y = player->actor.world.pos.y + 80.0f;
+    }
+    // The healing fairy only heals when it floats a little above Link's feet, so do not leave it on the floor.
+    if (def.actorId == ACTOR_EN_ELF) {
+        pos.y += 40.0f;
     }
     return foundFloor;
 }
