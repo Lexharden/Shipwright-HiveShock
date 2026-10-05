@@ -241,6 +241,13 @@ void SohMenu::AddMenuNetwork() {
             info.name = "Starting...";
         }
     });
+    AddWidget(path, "Defeat Alive Enemies When Link Dies", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_REMOTE_HIVESHOCK("DefeatOnDeath"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When Link dies, the HiveShock enemies that are still alive are removed and counted as defeated, so you "
+            "never get stuck with enemies you cannot kill. The spawns still waiting in the queue carry on as usual. "
+            "When off, the living enemies follow Link back into the scene after he dies."));
     AddWidget(path, "Enemy Counter", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
         info.isHidden = !HiveShock::Instance->IsEnabled();
         const HiveShock::Stats stats = HiveShock::Instance->GetStats();

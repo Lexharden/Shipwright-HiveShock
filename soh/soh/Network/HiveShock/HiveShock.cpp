@@ -910,6 +910,24 @@ void ClearBridgeEnemies() {
     SPDLOG_INFO("[HiveShock] cleared bridge enemies");
 }
 
+// Link died: removes the injected enemies that are still alive and counts them as defeated, so they are not queued
+// again by the scene reload and the spawns still waiting simply carry on. Only used when the player turned on
+// "Defeat alive enemies when Link dies".
+void DefeatAliveEnemies() {
+    int defeated = 0;
+    for (TrackedEnemy& t : gTrackedEnemies) {
+        if (TrackedStillLoaded(t)) {
+            Actor_Kill(t.actor);
+        }
+        gStatDefeated++;
+        defeated++;
+    }
+    gTrackedEnemies.clear();
+    if (defeated > 0) {
+        SPDLOG_INFO("[HiveShock] Link died: {} alive enemies marked as defeated", defeated);
+    }
+}
+
 // Explicit streamer action: forgets the spawns that are still waiting.
 void ClearPendingSpawns() {
     SPDLOG_INFO("[HiveShock] cleared {} pending spawns", gPendingSpawns.size());
@@ -2284,6 +2302,9 @@ static void RegisterHiveShock() {
 
         if (gPlayState->gameOverCtx.state == GAMEOVER_DEATH_WAIT_GROUND && !gDeathCountedThisCycle) {
             RegisterDeath("player death");
+            if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("DefeatOnDeath"), 0)) {
+                DefeatAliveEnemies();
+            }
         } else if (gPlayState->gameOverCtx.state == GAMEOVER_INACTIVE) {
             gDeathCountedThisCycle = false;
         }
