@@ -294,6 +294,13 @@ void SohMenu::AddMenuNetwork() {
             "When Link dies, the HiveShock enemies that are still alive are removed and counted as defeated, so you "
             "never get stuck with enemies you cannot kill. The spawns still waiting in the queue carry on as usual. "
             "When off, the living enemies follow Link back into the scene after he dies."));
+    AddWidget(path, "Enemies Disappear On Zone Change", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_REMOTE_HIVESHOCK("DespawnOnZoneChange"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "When Link changes zone (a room inside a dungeon or a loading screen) the HiveShock enemies that are "
+            "still alive are left behind and counted as defeated. The spawns still waiting in the queue carry on "
+            "and enter in the new zone. When off (default), the living enemies follow Link to the new zone."));
     AddWidget(path, "Enemy Counter", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
         info.isHidden = !HiveShock::Instance->IsEnabled();
         const HiveShock::Stats stats = HiveShock::Instance->GetStats();

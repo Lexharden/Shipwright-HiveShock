@@ -1009,10 +1009,10 @@ void ClearBridgeEnemies() {
     SPDLOG_INFO("[HiveShock] cleared bridge enemies");
 }
 
-// Link died: removes the injected enemies that are still alive and counts them as defeated, so they are not queued
-// again by the scene reload and the spawns still waiting simply carry on. Only used when the player turned on
-// "Defeat alive enemies when Link dies".
-void DefeatAliveEnemies() {
+// Removes the injected enemies that are still alive and counts them as defeated, so they are not queued again by a
+// scene reload and the spawns still waiting simply carry on. Used when Link dies ("Defeat alive enemies when Link
+// dies") and on a zone change ("Enemies disappear on zone change"); both are options the player turns on.
+void DefeatAliveEnemies(const char* reason) {
     int defeated = 0;
     for (TrackedEnemy& t : gTrackedEnemies) {
         if (TrackedStillLoaded(t)) {
@@ -1023,7 +1023,7 @@ void DefeatAliveEnemies() {
     }
     gTrackedEnemies.clear();
     if (defeated > 0) {
-        SPDLOG_INFO("[HiveShock] Link died: {} alive enemies marked as defeated", defeated);
+        SPDLOG_INFO("[HiveShock] {}: {} alive enemies marked as defeated", reason, defeated);
     }
 }
 
@@ -1035,8 +1035,18 @@ void ClearPendingSpawns() {
 }
 
 // The scene is going away (or we are at the title screen): everything injected that was still alive is queued again
-// so it reappears next to Link, and the tracking starts clean. Does not touch the old actor pointers.
+// so it reappears next to Link, and the tracking starts clean. Does not touch the old actor pointers. With
+// "Enemies disappear on zone change" they are not queued again: they are left behind and counted as defeated.
 void ResetBridgeActorTracking() {
+    if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("DespawnOnZoneChange"), 0)) {
+        if (!gTrackedEnemies.empty()) {
+            gStatDefeated += static_cast<int>(gTrackedEnemies.size());
+            SPDLOG_INFO("[HiveShock] scene change: {} alive enemies left behind, marked as defeated",
+                        gTrackedEnemies.size());
+            gTrackedEnemies.clear();
+        }
+        return;
+    }
     std::vector<TrackedEnemy> survivors;
     for (TrackedEnemy& t : gTrackedEnemies) {
         if (t.alive) {
@@ -2465,6 +2475,10 @@ static void RegisterHiveShock() {
         if (room != gLastRoom) {
             if (gLastRoom != -1) {
                 gRoomGraceUntilTick = gTick + kRoomGraceTicks;
+                // Before the upkeep below, so the grace window cannot queue them again.
+                if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("DespawnOnZoneChange"), 0)) {
+                    DefeatAliveEnemies("zone change");
+                }
             }
             gLastRoom = room;
         }
@@ -2479,7 +2493,7 @@ static void RegisterHiveShock() {
         if (gPlayState->gameOverCtx.state == GAMEOVER_DEATH_WAIT_GROUND && !gDeathCountedThisCycle) {
             RegisterDeath("player death");
             if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("DefeatOnDeath"), 0)) {
-                DefeatAliveEnemies();
+                DefeatAliveEnemies("Link died");
             }
         } else if (gPlayState->gameOverCtx.state == GAMEOVER_INACTIVE) {
             gDeathCountedThisCycle = false;
