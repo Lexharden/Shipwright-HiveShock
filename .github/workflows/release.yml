@@ -1,0 +1,52 @@
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (must already exist, e.g. v1.0.0)'
+        required: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/generate-builds.yml
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+    - name: Download Windows build
+      uses: actions/download-artifact@v8
+      with:
+        name: soh-windows
+        path: soh-windows
+    - name: Download macOS build
+      uses: actions/download-artifact@v8
+      with:
+        name: soh-mac
+        path: soh-mac
+    - name: Download Linux build
+      uses: actions/download-artifact@v8
+      with:
+        name: soh-linux
+        path: soh-linux
+    - name: Package release files
+      run: |
+        mkdir release
+        (cd soh-windows && zip -r "../release/HiveShock-${TAG}-Win64.zip" .)
+        cp soh-mac/SoH.dmg "release/HiveShock-${TAG}-macOS.dmg"
+        cp soh-linux/soh.appimage "release/HiveShock-${TAG}-Linux.appimage"
+        ls -l release
+    - name: Create GitHub Release
+      run: |
+        gh release create "$TAG" release/* \
+          --repo "${{ github.repository }}" \
+          --title "HiveShock $TAG" \
+          --generate-notes

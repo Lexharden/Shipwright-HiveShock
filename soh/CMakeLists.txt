@@ -611,6 +611,12 @@ add_custom_command(
     COMMENT "Copying asset ymls..."
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${CMAKE_SOURCE_DIR}/soh/assets/yml $<TARGET_FILE_DIR:soh>/assets
 )
+add_custom_command(
+    TARGET ${PROJECT_NAME}
+    POST_BUILD
+    COMMENT "Copying game archives (soh.o2r / oot*.o2r)..."
+    COMMAND ${CMAKE_COMMAND} -DSRC_DIR=${CMAKE_BINARY_DIR}/soh -DDST_DIR=$<TARGET_FILE_DIR:soh> -P ${CMAKE_CURRENT_SOURCE_DIR}/CMake/CopyGameArchives.cmake
+)
 ################################################################################
 # Dependencies
 ################################################################################
