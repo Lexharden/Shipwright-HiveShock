@@ -40,13 +40,13 @@ jobs:
     - name: Package release files
       run: |
         mkdir release
-        (cd soh-windows && zip -r "../release/HiveShock-${TAG}-Win64.zip" .)
-        cp soh-mac/SoH.dmg "release/HiveShock-${TAG}-macOS.dmg"
-        cp soh-linux/soh.appimage "release/HiveShock-${TAG}-Linux.appimage"
+        (cd soh-windows && zip -r "../release/Shipwright-HiveShock-${TAG}-Win64.zip" .)
+        cp soh-mac/SoH.dmg "release/Shipwright-HiveShock-${TAG}-macOS.dmg"
+        cp soh-linux/soh.appimage "release/Shipwright-HiveShock-${TAG}-Linux.appimage"
         ls -l release
     - name: Create GitHub Release
       run: |
         gh release create "$TAG" release/* \
           --repo "${{ github.repository }}" \
-          --title "HiveShock $TAG" \
+          --title "Shipwright-HiveShock $TAG" \
           --generate-notes
