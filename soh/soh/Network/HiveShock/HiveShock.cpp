@@ -29,6 +29,7 @@
 #include "soh/SaveManager.h"
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
+#include "overlays/actors/ovl_En_Bb/z_en_bb.h"
 #include "overlays/actors/ovl_En_Elf/z_en_elf.h"
 #include "overlays/actors/ovl_En_Niw/z_en_niw.h"
 
@@ -268,7 +269,8 @@ constexpr SpawnDef kSpawnTable[] = {
     { "white_wolfos", ACTOR_EN_WF, (0xFF << 8) | 1, false, 3 },
     { "stalchild", ACTOR_EN_SKB, 0, false, 1 },
     { "stalfos", ACTOR_EN_TEST, 2, false, 3 },
-    { "bubble", ACTOR_EN_BB, 0, false, 1 },
+    // params 0 is ENBB_FLAME_TRAIL (a trail segment with no targetActor, crashes in EnBb_FlameTrail); -1 is ENBB_BLUE.
+    { "bubble", ACTOR_EN_BB, ENBB_BLUE, false, 1 },
     { "skulltula", ACTOR_EN_ST, 0, false, 1 },
     { "bat", ACTOR_EN_FIREFLY, 2, false, 1 },
     { "tektite", ACTOR_EN_TITE, 0, false, 1 },
