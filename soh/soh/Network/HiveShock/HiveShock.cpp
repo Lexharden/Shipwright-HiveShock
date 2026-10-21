@@ -2168,10 +2168,14 @@ HiveShock* HiveShock::Instance = nullptr;
 
 void HiveShock::Enable() {
     StartServer();
+    // Registers the per-frame hook that drains the command queue; without it, enabling from the menu after boot
+    // accepts connections but never applies anything.
+    ShipInit::Init(CVAR_NAME);
 }
 
 void HiveShock::Disable() {
     StopServer();
+    ShipInit::Init(CVAR_NAME);
 }
 
 bool HiveShock::IsEnabled() const {
