@@ -8,6 +8,7 @@
 #include <soh/Network/Sail/Sail.h>
 #include <soh/Network/CrowdControl/CrowdControl.h>
 #include <soh/Network/HiveShock/HiveShock.h>
+#include <soh/Network/HiveShock/HiveShockUpdater.h>
 #include "soh/SohGui/UIWidgets.hpp"
 
 namespace SohGui {
@@ -324,6 +325,73 @@ void SohMenu::AddMenuNetwork() {
         .Options(WindowButtonOptions().Tooltip(
             "Shows a small on-screen counter of the enemies sent through HiveShock: spawned out of the total "
             "received, alive, waiting in the queue and defeated."));
+
+    AddWidget(path, "Updates", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Version", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
+        // The first time this page is drawn in a session it looks for a new release (one request, off the game
+        // thread). After that only the button below asks again.
+        HiveShockUpdater::CheckOnce();
+        const HiveShockUpdater::Snapshot update = HiveShockUpdater::GetSnapshot();
+        info.name = "Version: " + (update.current.empty() ? std::string("development build") : update.current);
+        if (!update.latest.empty()) {
+            info.name += "  |  Latest release: " + update.latest;
+        }
+    });
+    AddWidget(path, "Update Status", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
+        const HiveShockUpdater::Snapshot update = HiveShockUpdater::GetSnapshot();
+        info.name = update.message;
+        if (update.state == HiveShockUpdater::State::Downloading && update.percent > 0) {
+            info.name += " " + std::to_string(update.percent) + "%";
+        }
+        info.isHidden = update.message.empty();
+    });
+    AddWidget(path, "Check For Updates", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip("Asks GitHub whether a newer HiveShock release exists."))
+        .PreFunc([](WidgetInfo& info) {
+            const HiveShockUpdater::State state = HiveShockUpdater::GetSnapshot().state;
+            info.options->disabled =
+                state == HiveShockUpdater::State::Checking || state == HiveShockUpdater::State::Downloading;
+        })
+        .Callback([](WidgetInfo& info) { HiveShockUpdater::CheckNow(); });
+    AddWidget(path, "Download Update", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Downloads the newest release for this system from GitHub. On Windows the files are unpacked and can "
+            "be installed with one more click; on other systems the file is saved in your Downloads folder."))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = HiveShockUpdater::GetSnapshot().state != HiveShockUpdater::State::Available;
+        })
+        .Callback([](WidgetInfo& info) { HiveShockUpdater::Download(); });
+    AddWidget(path, "Install And Restart", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Closes the game, copies the new files over the current ones and opens the game again. Your saves and "
+            "settings are not touched."))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !HiveShockUpdater::CanInstall() ||
+                            HiveShockUpdater::GetSnapshot().state != HiveShockUpdater::State::Ready;
+        })
+        .Callback([](WidgetInfo& info) { HiveShockUpdater::InstallAndRestart(); });
+    AddWidget(path, "Open Download Folder", WIDGET_BUTTON)
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = HiveShockUpdater::CanInstall() ||
+                            HiveShockUpdater::GetSnapshot().state != HiveShockUpdater::State::Ready;
+        })
+        .Callback([](WidgetInfo& info) {
+            const std::string location = HiveShockUpdater::GetSnapshot().location;
+            if (!location.empty()) {
+                SDL_OpenURL(std::string("file://" + location).c_str());
+            }
+        });
+    AddWidget(path, "Open Release Page", WIDGET_BUTTON)
+        .PreFunc([](WidgetInfo& info) {
+            const HiveShockUpdater::State state = HiveShockUpdater::GetSnapshot().state;
+            info.isHidden = state != HiveShockUpdater::State::Available && state != HiveShockUpdater::State::Ready;
+        })
+        .Callback([](WidgetInfo& info) {
+            const std::string url = HiveShockUpdater::GetSnapshot().releaseUrl;
+            if (!url.empty()) {
+                SDL_OpenURL(url.c_str());
+            }
+        });
 
     path.sidebarName = "Anchor";
     AddSidebarEntry("Network", path.sidebarName, 2);
