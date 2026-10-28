@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <memory> // z64.h includes it; it must not be pulled in for the first time inside extern "C"
 
 extern "C" {
 #include <z64.h>
