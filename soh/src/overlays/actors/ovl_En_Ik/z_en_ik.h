@@ -35,6 +35,7 @@ typedef struct EnIk {
     /* 0x04D0 */ u32 npcAction;
     /* 0x04D4 */ s32 isAxeSummoned;
     /* 0x04D8 */ char unk_4D8[0x04];
-} EnIk; // size = 0x04DC
+    /* 0x04DC */ u8 hiveShockNabooru; // Nabooru spawned by HiveShock: never reads or writes the story flags
+} EnIk;                               // size = 0x04E0
 
 #endif

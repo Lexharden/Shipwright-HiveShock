@@ -1410,7 +1410,11 @@ void EnIk_Draw(Actor* thisx, PlayState* play) {
 
 void func_80A780D0(EnIk* this, PlayState* play) {
     if (this->actor.params == 0) {
-        if (!Flags_GetEventChkInf(EVENTCHKINF_BEGAN_NABOORU_BATTLE)) {
+        if (this->hiveShockNabooru) {
+            // Straight into the fight, as if the cutscene had already happened.
+            func_80A78160(this, play);
+            EnIk_StartMusic();
+        } else if (!Flags_GetEventChkInf(EVENTCHKINF_BEGAN_NABOORU_BATTLE)) {
             this->actor.update = EnIk_Update;
             this->actor.draw = EnIk_Draw;
             Actor_SetScale(&this->actor, 0.01f);
@@ -1426,7 +1430,9 @@ void func_80A78160(EnIk* this, PlayState* play) {
     this->actor.update = func_80A75FA0;
     this->actor.draw = func_80A76798;
     this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE;
-    Flags_SetEventChkInf(EVENTCHKINF_BEGAN_NABOORU_BATTLE);
+    if (!this->hiveShockNabooru) {
+        Flags_SetEventChkInf(EVENTCHKINF_BEGAN_NABOORU_BATTLE);
+    }
     Actor_SetScale(&this->actor, 0.012f);
     func_80A7489C(this);
 }
@@ -1435,6 +1441,23 @@ void func_80A781CC(Actor* thisx, PlayState* play) {
     EnIk* this = (EnIk*)thisx;
 
     if (!Play_InCsMode(play)) {
+        if (this->hiveShockNabooru) {
+            // No defeat cutscene and no story flags: burn out like the quick boss deaths do and disappear.
+            Vec3f pos;
+            Vec3f vel = { 0.0f, 0.5f, 0.0f };
+            s32 i;
+
+            for (i = 100; i >= 0; i--) {
+                pos.x = this->actor.world.pos.x + Rand_CenteredFloat(120.0f);
+                pos.z = this->actor.world.pos.z + Rand_CenteredFloat(120.0f);
+                pos.y = this->actor.world.pos.y + 20.0f + Rand_CenteredFloat(120.0f);
+                EffectSsDeadDb_Spawn(play, &pos, &vel, &vel, 100, 0, 255, 255, 255, 255, 0, 0, 255, 1, 9, true);
+            }
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xB0);
+            GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+            Actor_Kill(&this->actor);
+            return;
+        }
         this->actor.update = EnIk_Update;
         this->actor.draw = EnIk_Draw;
         if (GameInteractor_Should(VB_NABOORU_KNUCKLE_DEATH_SCENE, true, this)) {
@@ -1452,8 +1475,14 @@ void EnIk_Init(Actor* thisx, PlayState* play) {
     EnIk* this = (EnIk*)thisx;
     s32 flag = this->actor.params & 0xFF00;
 
-    if (((this->actor.params & 0xFF) == 0 && (Flags_GetEventChkInf(EVENTCHKINF_FINISHED_NABOORU_BATTLE))) ||
-        (flag != 0 && Flags_GetSwitch(play, flag >> 8))) {
+    // HiveShock spawns Nabooru with switch flag 0xFF (the real one uses another): it ignores the finished-battle flag
+    // so it can appear after the Spirit Temple was beaten.
+    this->hiveShockNabooru = CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0) &&
+                             ((u16)this->actor.params == 0xFF00);
+
+    if (!this->hiveShockNabooru &&
+        (((this->actor.params & 0xFF) == 0 && (Flags_GetEventChkInf(EVENTCHKINF_FINISHED_NABOORU_BATTLE))) ||
+         (flag != 0 && Flags_GetSwitch(play, flag >> 8)))) {
         Actor_Kill(&this->actor);
     } else {
         ActorShape_Init(&this->actor.shape, 0.0f, ActorShadow_DrawCircle, 30.0f);

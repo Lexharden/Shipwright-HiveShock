@@ -30,6 +30,9 @@
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
 #include "overlays/actors/ovl_En_Bb/z_en_bb.h"
+#include "overlays/actors/ovl_En_Am/z_en_am.h"
+#include "overlays/actors/ovl_En_Dh/z_en_dh.h"
+#include "overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 #include "overlays/actors/ovl_En_Elf/z_en_elf.h"
 #include "overlays/actors/ovl_En_Niw/z_en_niw.h"
 
@@ -287,6 +290,24 @@ constexpr SpawnDef kSpawnTable[] = {
     { "eyegore", ACTOR_EN_IK, 2, false, 4 },
     { "dark_link", ACTOR_EN_TORCH2, 0, false, 4 },
     { "arwing", ACTOR_EN_CLEAR_TAG, 1, false, 2 },
+    // Mini-bosses and dungeon enemies. Same params the enemy randomizer already spawns outside their rooms.
+    // Dead Hand: its params are ignored by Init; it is woken up after spawning (see SpawnDefNow).
+    { "dead_hand", ACTOR_EN_DH, 0, false, 4 },
+    // Nabooru's Iron Knuckle: switch flag 0xFF marks it as HiveShock's (see EnIk_Init), so no story flag is touched.
+    { "nabooru", ACTOR_EN_IK, (0xFF << 8), false, 5 },
+    { "dodongo", ACTOR_EN_DODONGO, -1, false, 3 },
+    { "baby_dodongo", ACTOR_EN_DODOJR, 0, false, 1 },
+    { "biri", ACTOR_EN_BILI, 0, false, 1 },
+    { "anubis", ACTOR_EN_ANUBICE_TAG, 1, false, 3 },
+    { "flying_pot", ACTOR_EN_TUBO_TRAP, 0, false, 1 },
+    // Gerudo Fighter with no key flag: see the VB hooks in RegisterHiveShock. Armos -1 is the enemy variant and is
+    // woken after spawning. Peahat -1 is the big grounded one (it rises when Link is close and sheds larvae).
+    { "gerudo_fighter", ACTOR_EN_GELDB, 0, false, 3 },
+    { "flare_dancer", ACTOR_EN_FD, 0, false, 4 },
+    { "armos", ACTOR_EN_AM, -1, false, 2 },
+    { "peahat", ACTOR_EN_PEEHAT, -1, false, 3 },
+    // Params 7 is the non-Gohma egg: it hatches by itself when Link is within 100 units, so it spawns close.
+    { "gohma_larva", ACTOR_EN_GOMA, 7, false, 1 },
     // ACTOR_EN_ELF is Navi with params 0; FAIRY_HEAL is the healing fairy (touching it restores 8 hearts).
     { "fairy", ACTOR_EN_ELF, FAIRY_HEAL, true, 0 },
     { "bombchu", ACTOR_EN_BOM_CHU, 0, true, 0 },
@@ -1177,9 +1198,12 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
     if (def.actorId == ACTOR_EN_SKB) {
         radii = kRadiiStalchild;
         radiiCount = ARRAY_COUNT(kRadiiStalchild);
-    } else if (def.actorId == ACTOR_EN_RD) {
+    } else if (def.actorId == ACTOR_EN_RD || def.actorId == ACTOR_EN_DH) {
         radii = kRadiiRedead;
         radiiCount = ARRAY_COUNT(kRadiiRedead);
+    } else if (def.actorId == ACTOR_EN_GOMA) {
+        radii = kRadiiStalchild;
+        radiiCount = ARRAY_COUNT(kRadiiStalchild);
     } else if (def.weight >= kEliteWeight) {
         radii = kRadiiElite;
         radiiCount = ARRAY_COUNT(kRadiiElite);
@@ -1215,7 +1239,7 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
             pos.y = floorY;
         }
     }
-    if (def.actorId == ACTOR_EN_CLEAR_TAG || def.actorId == ACTOR_EN_FIREFLY) {
+    if (def.actorId == ACTOR_EN_CLEAR_TAG || def.actorId == ACTOR_EN_FIREFLY || def.actorId == ACTOR_EN_BILI) {
         pos.y += 100.0f;
     }
     if (def.actorId == ACTOR_EN_NIW) {
@@ -1280,6 +1304,22 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
 
     if (def.actorId == ACTOR_EN_NIW) {
         reinterpret_cast<EnNiw*>(spawned)->actionFunc = func_80AB70A0_nocutscene;
+    }
+
+    if (def.actorId == ACTOR_EN_DH) {
+        // EnDh_Init buries it at a random spot up to 600 units around home (possibly in a wall or over a void) and
+        // waits for its hands or a bomb to wake it. Put it where it was placed and wake it, so it rises next to Link.
+        spawned->world.pos = pos;
+        spawned->prevPos = pos;
+        spawned->params = ENDH_START_ATTACK_GRAB;
+    }
+
+    if (def.actorId == ACTOR_EN_AM) {
+        // An Armos sleeps until Link touches or hits it. Wake it now; shakeOrigin must be set first because the
+        // waking shake is drawn around it (it is only filled in later by the sleeping state).
+        EnAm* armos = reinterpret_cast<EnAm*>(spawned);
+        armos->shakeOrigin = spawned->world.pos;
+        armos->unk_258 = 1;
     }
 
     if (!user.empty() && CVarGetInteger(CVAR_REMOTE_HIVESHOCK("EnemyNameTags"), 1)) {
@@ -2279,6 +2319,43 @@ static void RegisterHiveShock() {
             }
         } else if (gPlayState->gameOverCtx.state == GAMEOVER_INACTIVE) {
             gDeathCountedThisCycle = false;
+        }
+    });
+
+    // A Gerudo Fighter with no key flag only exists when HiveShock (or the enemy randomizer) spawns it. The vanilla
+    // ones wait for a switch flag and, when they beat Link, send him to the jail; neither makes sense here.
+    COND_VB_SHOULD(VB_GERUDO_FIGHTER_CONTINUE_WAITING, enabled, {
+        EnGeldB* enGeldB = va_arg(args, EnGeldB*);
+
+        if (enGeldB->keyFlag == 0 && (!enGeldB->invisible || enGeldB->actor.xzDistToPlayer <= 300.0f)) {
+            *should = false;
+        }
+    });
+
+    COND_VB_SHOULD(VB_GERUDO_FIGHTER_PLAY_MINIBOSS_MUSIC, enabled, {
+        EnGeldB* enGeldB = va_arg(args, EnGeldB*);
+
+        if (enGeldB->keyFlag == 0) {
+            *should = false;
+        }
+    });
+
+    // Same as a Wallmaster: send Link back to the last entrance instead of the jail.
+    COND_VB_SHOULD(VB_GERUDO_FIGHTER_THROW_LINK_TO_JAIL, enabled, {
+        EnGeldB* enGeldB = va_arg(args, EnGeldB*);
+
+        if (enGeldB->keyFlag == 0) {
+            *should = false;
+            Sfx_PlaySfxCentered(NA_SE_OC_ABYSS);
+            Play_TriggerRespawn(gPlayState);
+        }
+    });
+
+    COND_ID_HOOK(OnEnemyDefeat, ACTOR_EN_GELDB, enabled, [](void* refActor) {
+        EnGeldB* enGeldB = static_cast<EnGeldB*>(refActor);
+
+        if (enGeldB->keyFlag == 0) {
+            Item_DropCollectibleRandom(gPlayState, &enGeldB->actor, &enGeldB->actor.world.pos, 0xC0);
         }
     });
 
