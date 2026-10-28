@@ -16,6 +16,8 @@ extern "C" {
 #include "macros.h"
 #include <objects/object_ganon/object_ganon.h>
 #include <objects/object_ganon2/object_ganon2.h>
+#include <objects/object_ganon_anime1/object_ganon_anime1.h>
+#include <overlays/ovl_Boss_Ganon/ovl_Boss_Ganon.h>
 extern PlayState* gPlayState;
 }
 
@@ -28,13 +30,15 @@ constexpr f32 kBallSpeed = 7.0f;
 constexpr f32 kBallSpeedEnraged = 9.0f;
 constexpr f32 kReflectSpeed = 12.0f;
 constexpr s16 kBallLife = 140;
-constexpr f32 kHoverHeight = 80.0f; // above the floor and above Link's feet
+constexpr f32 kHoverHeight = 115.0f; // above the floor and above Link's feet
 constexpr f32 kPreferredDistance = 230.0f;
 constexpr s16 kFallMaxFrames = 90;
 constexpr f32 kBlastRadius = 120.0f;
 constexpr s16 kBeastHealth = 40;
-constexpr f32 kBeastWalkSpeed = 2.4f;
+constexpr f32 kBeastWalkSpeed = 4.5f;
 constexpr f32 kBeastSwingRange = 150.0f;
+constexpr f32 kBeastStopDistance = 85.0f;
+constexpr s16 kBeastAttackRadius = 125;
 
 // Spawn params: which Ganon this is. They are separate spawns of the same actor.
 enum Form : s16 {
@@ -81,6 +85,11 @@ struct HsGanon {
     s16 strafeTimer;
     s8 strafeDir;
     s16 bobPhase;
+    u8 anim;           // Ganondorf: 0 floating, 1 charging, 2 throwing
+    f32 orbScale;      // size of the ball he holds while charging
+    s16 orbSpin;
+    Vec3f handPos;     // right hand / left sword hand, as of the last draw
+    Vec3f swordPos;
     Ball balls[kMaxBalls];
 };
 
@@ -187,12 +196,8 @@ void Spark(PlayState* play, const Vec3f& at, f32 spread, bool bright) {
 }
 
 // Where the energy balls leave: in front of the chest.
-Vec3f HandPos(const HsGanon* self) {
-    Vec3f pos = self->actor.world.pos;
-    pos.x += Math_SinS(self->actor.shape.rot.y) * 40.0f;
-    pos.y += 50.0f;
-    pos.z += Math_CosS(self->actor.shape.rot.y) * 40.0f;
-    return pos;
+Vec3f HandPos(const HsGanon* self) { // set from the right hand limb when drawn
+    return self->handPos;
 }
 
 void ThrowBall(HsGanon* self, PlayState* play, s16 yawOffset) {
@@ -332,6 +337,9 @@ void Init(Actor* thisx, PlayState* play) {
 
     self->beast = (self->actor.params == FORM_BEAST);
     Actor_SetScale(&self->actor, 0.0f);
+    self->handPos = self->actor.world.pos;
+    self->handPos.y += 90.0f;
+    self->swordPos = self->handPos;
     self->actor.colChkInfo.mass = MASS_IMMOVABLE;
     self->actor.naviEnemyId = 0x3E;
     ActorShape_Init(&self->actor.shape, 0.0f, ActorShadow_DrawCircle, self->beast ? 90.0f : 45.0f);
@@ -357,7 +365,7 @@ void Init(Actor* thisx, PlayState* play) {
         self->actor.colChkInfo.health = kHealth;
         self->actor.colChkInfo.damageTable = &sDamageTable;
         SkelAnime_InitFlex(play, &self->skelAnime, (FlexSkeletonHeader*)gGanondorfSkel, nullptr, nullptr, nullptr, 0);
-        Animation_PlayLoop(&self->skelAnime, (AnimationHeader*)gGanondorfEndingFloatAnim);
+        Animation_PlayLoop(&self->skelAnime, (AnimationHeader*)gGanondorfFloatAnim);
         self->state = ST_APPEAR;
         self->timer = 30;
         self->cooldown = 50;
@@ -413,10 +421,18 @@ void UpdateFight(HsGanon* self, PlayState* play) {
     Math_SmoothStepToS(&self->actor.shape.rot.y, toLink, 3, 0x700, 0x80);
     self->actor.world.rot.y = self->actor.shape.rot.y;
 
+    if (self->anim == 2 && self->animDone) {
+        self->anim = 0;
+        Animation_MorphToLoop(&self->skelAnime, (AnimationHeader*)gGanondorfFloatAnim, -8.0f);
+    }
+    Math_ApproachF(&self->orbScale, (self->chargeTimer > 0) ? 7.0f : 0.0f, 0.4f, 0.9f);
+    self->orbSpin += 0x1800;
+
     // Charge, then throw: three balls in a fan once it is angry.
     if (self->chargeTimer > 0) {
-        Spark(play, HandPos(self), 18.0f, true);
         if (--self->chargeTimer == 0) {
+            self->anim = 2;
+            Animation_MorphToPlayOnce(&self->skelAnime, (AnimationHeader*)gGanondorfThrowAnim, -3.0f);
             if (self->enraged) {
                 ThrowBall(self, play, -0x1000);
                 ThrowBall(self, play, 0);
@@ -429,7 +445,9 @@ void UpdateFight(HsGanon* self, PlayState* play) {
         }
     } else if (--self->cooldown <= 0) {
         self->chargeTimer = self->enraged ? 18 : 28;
-        Audio_PlayActorSound2(&self->actor, NA_SE_EN_GANON_LAUGH);
+        self->anim = 1;
+        Animation_MorphToPlayOnce(&self->skelAnime, (AnimationHeader*)gGanondorfChargeLightBallAnim, -3.0f);
+        Audio_PlayActorSound2(&self->actor, NA_SE_EN_GANON_SPARK);
     }
 
     // Hits from Link.
@@ -438,6 +456,8 @@ void UpdateFight(HsGanon* self, PlayState* play) {
         if (self->actor.colChkInfo.damage > 0) {
             Hurt(self, self->actor.colChkInfo.damage);
             self->chargeTimer = 0;
+            self->anim = 0;
+            Animation_MorphToLoop(&self->skelAnime, (AnimationHeader*)gGanondorfFloatAnim, -6.0f);
             self->cooldown = std::max<s16>(self->cooldown, 25);
         }
     }
@@ -445,6 +465,7 @@ void UpdateFight(HsGanon* self, PlayState* play) {
     if (self->actor.colChkInfo.health == 0) {
         // Defeated: stop fighting and drop.
         self->state = ST_FALL;
+        self->orbScale = 0.0f;
         self->timer = 0;
         self->actor.velocity.y = 0.0f;
         self->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
@@ -512,9 +533,9 @@ void UpdateBeastWalk(HsGanon* self, PlayState* play) {
     const f32 dist = self->actor.xzDistToPlayer;
     const s16 toLink = self->actor.yawTowardsPlayer;
 
-    Math_SmoothStepToS(&self->actor.shape.rot.y, toLink, 3, 0x300, 0x40);
+    Math_SmoothStepToS(&self->actor.shape.rot.y, toLink, 3, 0x500, 0x40);
     self->actor.world.rot.y = self->actor.shape.rot.y;
-    self->actor.speedXZ = (dist > 110.0f) ? kBeastWalkSpeed : 0.0f;
+    self->actor.speedXZ = (dist > kBeastStopDistance) ? kBeastWalkSpeed : 0.0f;
     if (self->swingCooldown > 0) {
         self->swingCooldown--;
     }
@@ -538,7 +559,11 @@ void UpdateBeastWalk(HsGanon* self, PlayState* play) {
 void UpdateBeastSwing(HsGanon* self, PlayState* play) {
     self->actor.speedXZ = 0.0f;
     const f32 frame = self->skelAnime.curFrame;
-    self->attackOn = frame > self->timer * 0.35f && frame < self->timer * 0.7f;
+    self->attackOn = frame > self->timer * 0.3f && frame < self->timer * 0.75f;
+    if (self->attackOn) {
+        Spark(play, self->swordPos, 40.0f, true);
+        Spark(play, self->handPos, 40.0f, false);
+    }
     if (self->animDone) {
         self->attackOn = false;
         // After two swings he is winded now and then: the moment to hit him.
@@ -696,7 +721,7 @@ void Update(Actor* thisx, PlayState* play) {
             CollisionCheck_SetAC(play, &play->colChkCtx, &self->collider.base);
         }
     } else if (self->beast && self->state != ST_B_RISE && self->state != ST_B_DEATH) {
-        self->collider.dim.radius = self->attackOn ? 95 : 45;
+        self->collider.dim.radius = self->attackOn ? kBeastAttackRadius : 45;
         Collider_UpdateCylinder(&self->actor, &self->collider);
         CollisionCheck_SetOC(play, &play->colChkCtx, &self->collider.base);
         if (self->attackOn) {
@@ -715,16 +740,100 @@ void Update(Actor* thisx, PlayState* play) {
 static s32 HsGanon_BeastOverride(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {
     OPEN_DISPS(play->state.gfxCtx);
 
+    // Mane, cape and tails: the same grey the original uses (the hands and their swords are kept).
     if (limbIndex >= 42) {
-        gDPSetEnvColor(POLY_OPA_DISP++, 90, 90, 90, 255);
-    }
-    // The same limbs the original beast hides.
-    if (limbIndex == 7 || limbIndex == 13 || limbIndex == 33 || limbIndex == 34) {
-        *dList = nullptr;
+        gDPSetEnvColor(POLY_OPA_DISP++, 191, 191, 191, 255);
     }
 
     CLOSE_DISPS(play->state.gfxCtx);
     return 0;
+}
+
+static void HsGanon_BeastPost(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s* rot, void* thisx) {
+    HsGanon* self = reinterpret_cast<HsGanon*>(thisx);
+    static Vec3f origin = { 0.0f, 0.0f, 0.0f };
+    static Vec3f tip = { 0.0f, 0.0f, 14000.0f };
+
+    if (limbIndex == 7) {
+        Matrix_MultVec3f(&origin, &self->handPos);
+        Matrix_MultVec3f(&tip, &self->swordPos);
+    } else if (limbIndex == 13 && self->leftSwing) {
+        Matrix_MultVec3f(&origin, &self->handPos);
+        Matrix_MultVec3f(&tip, &self->swordPos);
+    }
+}
+
+static s32 HsGanon_DorfOverride(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {
+    // The legs hang loose while he floats.
+    if (limbIndex == 20 || limbIndex == 22 || limbIndex == 23 || limbIndex == 25) {
+        rot->z += 0x500;
+    }
+    return 0;
+}
+
+static void HsGanon_DorfPost(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s* rot, void* thisx) {
+    HsGanon* self = reinterpret_cast<HsGanon*>(thisx);
+    static Vec3f origin = { 0.0f, 0.0f, 0.0f };
+    static Vec3f palm = { 1300.0f, 0.0f, 0.0f };
+
+    if (limbIndex == 10) {
+        Matrix_MultVec3f(&palm, &self->handPos);
+    } else if (limbIndex == 11) {
+        OPEN_DISPS(play->state.gfxCtx);
+
+        gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        gSPDisplayList(POLY_XLU_DISP++, (Gfx*)gGanondorfEyesDL);
+
+        CLOSE_DISPS(play->state.gfxCtx);
+    }
+}
+
+// A glowing ball of energy: the one he holds while charging and the ones he throws.
+static void HsGanon_DrawOrb(PlayState* play, const Vec3f& at, f32 scale, s16 spin, bool bright) {
+    OPEN_DISPS(play->state.gfxCtx);
+
+    Matrix_Translate(at.x, at.y, at.z, MTXMODE_NEW);
+    Matrix_ReplaceRotation(&play->billboardMtxF);
+    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
+    Matrix_RotateZ(spin * (M_PI / 32768.0f), MTXMODE_APPLY);
+    gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(POLY_XLU_DISP++, (Gfx*)gGanondorfSquareDL);
+    (void)bright;
+
+    CLOSE_DISPS(play->state.gfxCtx);
+}
+
+static void HsGanon_DrawOrbs(HsGanon* self, PlayState* play) {
+    OPEN_DISPS(play->state.gfxCtx);
+
+    Gfx_SetupDL_25Xlu(play->state.gfxCtx);
+    gSPDisplayList(POLY_XLU_DISP++, (Gfx*)gGanondorfLightBallMaterialDL);
+
+    if (self->orbScale > 0.1f) {
+        FrameInterpolation_RecordOpenChild("HiveShock Ganon hand orb", 0);
+        gDPSetPrimColor(POLY_XLU_DISP++, 0, 0, 255, 220, 255, 255);
+        gDPSetEnvColor(POLY_XLU_DISP++, 160, 0, 255, 0);
+        HsGanon_DrawOrb(play, self->handPos, self->orbScale, self->orbSpin, false);
+        FrameInterpolation_RecordCloseChild();
+    }
+    for (int i = 0; i < kMaxBalls; i++) {
+        const Ball& ball = self->balls[i];
+        if (!ball.active) {
+            continue;
+        }
+        FrameInterpolation_RecordOpenChild("HiveShock Ganon ball", i);
+        if (ball.reflected) {
+            gDPSetPrimColor(POLY_XLU_DISP++, 0, 0, 255, 255, 255, 255);
+            gDPSetEnvColor(POLY_XLU_DISP++, 255, 230, 60, 0);
+        } else {
+            gDPSetPrimColor(POLY_XLU_DISP++, 0, 0, 255, 200, 255, 255);
+            gDPSetEnvColor(POLY_XLU_DISP++, 170, 0, 255, 0);
+        }
+        HsGanon_DrawOrb(play, ball.pos, ball.reflected ? 6.5f : 5.0f, static_cast<s16>(ball.life * 0x1400), ball.reflected);
+        FrameInterpolation_RecordCloseChild();
+    }
+
+    CLOSE_DISPS(play->state.gfxCtx);
 }
 
 static void HsGanon_Draw(Actor* thisx, PlayState* play) {
@@ -736,11 +845,12 @@ static void HsGanon_Draw(Actor* thisx, PlayState* play) {
     Gfx_SetupDL_25Xlu(play->state.gfxCtx);
     if (self->beast) {
         gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL((uintptr_t)gGanonEyeOpenTex));
-        SkelAnime_DrawSkeletonOpa(play, &self->skelAnime, HsGanon_BeastOverride, nullptr, &self->actor);
+        SkelAnime_DrawSkeletonOpa(play, &self->skelAnime, HsGanon_BeastOverride, HsGanon_BeastPost, &self->actor);
     } else {
         gSPSegment(POLY_OPA_DISP++, 0x08, SEGMENTED_TO_VIRTUAL((uintptr_t)gGanondorfNormalEyeTex));
         gSPSegment(POLY_XLU_DISP++, 0x08, SEGMENTED_TO_VIRTUAL((uintptr_t)gGanondorfNormalEyeTex));
-        SkelAnime_DrawSkeletonOpa(play, &self->skelAnime, nullptr, nullptr, &self->actor);
+        SkelAnime_DrawSkeletonOpa(play, &self->skelAnime, HsGanon_DorfOverride, HsGanon_DorfPost, &self->actor);
+        HsGanon_DrawOrbs(self, play);
     }
 
     CLOSE_DISPS(play->state.gfxCtx);
