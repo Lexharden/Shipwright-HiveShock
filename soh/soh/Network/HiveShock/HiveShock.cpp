@@ -21,7 +21,6 @@
 
 #include "HiveShock.h"
 #include "HiveShockAdmission.h"
-#include "HiveShockGanon.h"
 
 #include <libultraship/bridge/consolevariablebridge.h>
 #include "soh/ActorDB.h"
@@ -260,9 +259,6 @@ u32 gLastQueueReportTick = 0;
 bool gQueueReportForce = true;
 std::string gLastQueueReport;
 
-// Stands for HiveShock's own Ganon actor, whose id is only known once it is added to the ActorDB.
-constexpr s16 kGanonActorId = -2;
-
 constexpr SpawnDef kSpawnTable[] = {
     { "enemy", ACTOR_EN_RR, 0, false, 2 },
     { "like_like", ACTOR_EN_RR, 0, false, 2 },
@@ -305,12 +301,11 @@ constexpr SpawnDef kSpawnTable[] = {
     { "biri", ACTOR_EN_BILI, 0, false, 1 },
     { "anubis", ACTOR_EN_ANUBICE_TAG, 1, false, 3 },
     { "flying_pot", ACTOR_EN_TUBO_TRAP, 0, false, 1 },
-    // Ganon, our own actor: params 0 is the floating Ganondorf (energy balls you can bat back, explodes when
-    // beaten), params 1 the beast of the second phase.
-    { "ganon", kGanonActorId, 0, false, 6 },
-    { "ganondorf", kGanonActorId, 0, false, 6 },
-    // The second phase on its own: a separate spawn, not a transformation of the one above.
-    { "ganon_beast", kGanonActorId, 1, false, 8 },
+    // The real Ganondorf and Ganon (beast) of the final fights, started straight in the fight with no cutscene and
+    // around the spot they spawn at; when beaten they explode (see the gHiveShockBossSpawn notes in z_boss_ganon.c
+    // and z_boss_ganon2.c). Separate spawns: the beast is not a transformation of Ganondorf.
+    { "ganondorf", ACTOR_BOSS_GANON, 0, false, 6 },
+    { "ganon_beast", ACTOR_BOSS_GANON2, 0, false, 8 },
     // Barinade: params -1 is the body, which builds the rest (see the gHiveShockBossSpawn notes in z_boss_va.c).
     { "barinade", ACTOR_BOSS_VA, -1, false, 8 },
     // Gerudo Fighter with no key flag: see the VB hooks in RegisterHiveShock. Armos -1 is the enemy variant and is
@@ -925,13 +920,15 @@ void RequeueSurvivors(const std::vector<TrackedEnemy>& survivors) {
     }
 }
 
-s16 ActorIdOf(const SpawnDef& def) {
-    return def.actorId == kGanonActorId ? static_cast<s16>(HiveShockGanon_ActorId()) : def.actorId;
+// The bosses taken from the vanilla game. Their parts share static state, so only one of Barinade, Ganondorf and
+// Ganon can exist at a time, and their update order must not be shuffled.
+bool IsHiveBoss(s16 actorId) {
+    return actorId == ACTOR_BOSS_VA || actorId == ACTOR_BOSS_GANON || actorId == ACTOR_BOSS_GANON2;
 }
 
 bool TrackedStillLoaded(const TrackedEnemy& t) {
     // The id check guards against a freed actor whose memory was reused by a different one.
-    return ActorStillLoaded(t.actor) && t.def != nullptr && t.actor->id == ActorIdOf(*t.def);
+    return ActorStillLoaded(t.actor) && t.def != nullptr && t.actor->id == t.def->actorId;
 }
 
 // Drops enemies that are gone. A normal death just disappears; but right after a room change an enemy that vanishes
@@ -1119,10 +1116,10 @@ bool EnqueueEnemySpawn(std::string name, std::string user, u32 delayTicks) {
     return true;
 }
 
-// Whether Barinade (or any part of it) is in the scene. Its parts share static state, so two cannot coexist.
-bool IsBarinadeInScene() {
+// Whether Barinade, Ganondorf or Ganon (or any part of them) is in the scene.
+bool IsGanonInScene() {
     for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
-        if (it->id == ACTOR_BOSS_VA) {
+        if (it->id == ACTOR_BOSS_GANON || it->id == ACTOR_BOSS_GANON2 || it->id == ACTOR_BOSS_VA) {
             return true;
         }
     }
@@ -1155,7 +1152,7 @@ Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY,
         gPlayState->actorCtx.flags.clear &= ~roomBit;
     }
 
-    gHiveShockBossSpawn = (actorId == ACTOR_BOSS_VA);
+    gHiveShockBossSpawn = IsHiveBoss(actorId);
     Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState, actorId, x, y, z, rotX, rotY, rotZ, params);
     gHiveShockBossSpawn = 0;
 
@@ -1174,7 +1171,13 @@ bool CanSpawnInCurrentScene(const SpawnDef& def) {
     }
     if (def.actorId == ACTOR_BOSS_VA) {
         // Not in Jabu-Jabu's boss room (the real Barinade shares its state), and never two at once.
-        if (sceneNum == SCENE_JABU_JABU_BOSS || IsBarinadeInScene()) {
+        if (sceneNum == SCENE_JABU_JABU_BOSS || IsGanonInScene()) {
+            return false;
+        }
+    }
+    if (def.actorId == ACTOR_BOSS_GANON || def.actorId == ACTOR_BOSS_GANON2) {
+        // Not where the real fight lives (it shares the static state), and never both forms at once.
+        if (sceneNum == SCENE_GANON_BOSS || sceneNum == SCENE_GANONDORF_BOSS || IsGanonInScene()) {
             return false;
         }
     }
@@ -1334,13 +1337,13 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
     const s16 yawBase = player->actor.shape.rot.y;
 
     s16 faceYaw = Math_Vec3f_Yaw(&pos, &player->actor.world.pos);
-    Actor* spawned = SpawnActorInAnyRoom(ActorIdOf(def), pos.x, pos.y, pos.z, 0, faceYaw, 0, def.params);
+    Actor* spawned = SpawnActorInAnyRoom(def.actorId, pos.x, pos.y, pos.z, 0, faceYaw, 0, def.params);
     if (spawned == nullptr) {
         // Fall back beside Link if the chosen point is invalid for Actor_Spawn.
         pos = player->actor.world.pos;
         pos.x += Math_SinS(yawBase) * 40.0f;
         pos.z += Math_CosS(yawBase) * 40.0f;
-        spawned = SpawnActorInAnyRoom(ActorIdOf(def), pos.x, pos.y, pos.z, 0, faceYaw, 0, def.params);
+        spawned = SpawnActorInAnyRoom(def.actorId, pos.x, pos.y, pos.z, 0, faceYaw, 0, def.params);
     }
     if (spawned == nullptr) {
         SPDLOG_WARN("[HiveShock] Actor_Spawn({}) returned NULL (actors={})", def.name, gPlayState->actorCtx.total);
@@ -1348,7 +1351,7 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
     }
 
     // Barinade's parts are spawned as its children in a fixed order, which its update relies on.
-    if (def.actorId != ACTOR_BOSS_VA) {
+    if (!IsHiveBoss(def.actorId)) {
         MoveActorToListTail(spawned);
     }
 
@@ -1424,7 +1427,7 @@ void UpdateTrackedEnemies() {
             tracked.alive = false;
         }
         // Moving only Barinade's body would tear it away from the rest of its parts.
-        if (!checkStuck || !tracked.alive || tracked.def->actorId == ACTOR_BOSS_VA) {
+        if (!checkStuck || !tracked.alive || IsHiveBoss(tracked.def->actorId)) {
             continue;
         }
 

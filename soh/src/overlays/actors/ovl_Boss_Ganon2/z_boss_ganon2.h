@@ -106,6 +106,8 @@ typedef struct BossGanon2 {
     /* 0x0444 */ ColliderJntSph unk_444;
     /* 0x0464 */ ColliderJntSphElement unk_464[16];
     /* 0x0864 */ ColliderJntSphElement unk_864[2];
-} BossGanon2; // size = 0x08E4
+    // HiveShock: spawned as an enemy outside the tower, already in the fight and exploding when beaten.
+    u8 hiveShock;
+} BossGanon2;
 
 #endif

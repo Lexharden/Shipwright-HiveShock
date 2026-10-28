@@ -344,6 +344,11 @@ void EnGanonMant_Update(Actor* thisx, PlayState* play) {
     EnGanonMant* this = (EnGanonMant*)thisx;
     BossGanon* ganon = (BossGanon*)this->actor.parent;
 
+    if (ganon == NULL) {
+        Actor_Kill(&this->actor);
+        return;
+    }
+
     this->updateHasRun = true;
     this->frameTimer++;
 

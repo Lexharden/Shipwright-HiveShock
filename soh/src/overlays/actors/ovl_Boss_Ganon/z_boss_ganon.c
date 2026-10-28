@@ -11,6 +11,7 @@
 #include "assets/scenes/dungeons/ganon_boss/ganon_boss_scene.h"
 
 #include "soh/frame_interpolation.h"
+#include "soh/Network/HiveShock/HiveShockBossDeath.h"
 #include "soh/OTRGlobals.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/savestate_serialize.h"
@@ -337,6 +338,11 @@ void BossGanon_SetColliderPos(Vec3f* pos, ColliderCylinder* collider) {
 
 void BossGanon_SetAnimationObject(BossGanon* this, PlayState* play, s32 objectId) {
     this->animBankIndex = Object_GetIndex(&play->objectCtx, objectId);
+    if (this->animBankIndex < 0) {
+        // HiveShock can spawn Ganondorf in a scene that never loaded these objects. Assets resolve by name, so any
+        // slot is fine for the segment.
+        this->animBankIndex = 0;
+    }
     gSegments[6] = VIRTUAL_TO_PHYSICAL(play->objectCtx.status[this->animBankIndex].segment);
 }
 
@@ -358,7 +364,11 @@ void BossGanon_Init(Actor* thisx, PlayState* play2) {
     Player* player = GET_PLAYER(play);
 
     if (thisx->params < 0x64) {
-        Flags_SetSwitch(play, 0x14);
+        const s32 hiveShock = gHiveShockBossSpawn != 0;
+
+        if (!hiveShock) {
+            Flags_SetSwitch(play, 0x14);
+        }
         play->specialEffects = sEffects;
 
         for (i = 0; i < ARRAY_COUNT(sEffects); i++) {
@@ -374,7 +384,11 @@ void BossGanon_Init(Actor* thisx, PlayState* play2) {
         Collider_InitCylinder(play, &this->collider);
         Collider_SetCylinder(play, &this->collider, thisx, &sDorfCylinderInit);
 
-        if (thisx->params != 1) {
+        if (hiveShock) {
+            // No intro: he is already in the fight, hovering around where he appeared.
+            this->hiveShock = true;
+            this->hiveHome = thisx->world.pos;
+        } else if (thisx->params != 1) {
             BossGanon_SetupIntroCutscene(this, play);
             this->organAlpha = 255;
         } else {
@@ -396,6 +410,10 @@ void BossGanon_Init(Actor* thisx, PlayState* play2) {
         sCape = (EnGanonMant*)Actor_SpawnAsChild(&play->actorCtx, thisx, play, ACTOR_EN_GANON_MANT, 0.0f, 0.0f, 0.0f, 0,
                                                  0, 0, 1);
         Actor_ChangeCategory(play, &play->actorCtx, thisx, ACTORCAT_BOSS);
+
+        if (hiveShock) {
+            BossGanon_SetupWait(this, play);
+        }
     } else {
         thisx->flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
         this->fwork[GDF_FWORK_1] = 255.0f;
@@ -481,8 +499,37 @@ void BossGanon_Init(Actor* thisx, PlayState* play2) {
     Gfx_RegisterBlendedTexture(ganon_boss_sceneTex_007418, sWindowShatterTex, NULL);
 }
 
+// The cape and the energy balls are children of Ganondorf and read him as their parent, so they never outlive him.
+static void BossGanon_HiveShockKillChildren(BossGanon* this, PlayState* play) {
+    s32 category;
+    Actor* it;
+
+    for (category = 0; category < ACTORCAT_MAX; category++) {
+        for (it = play->actorCtx.actorLists[category].head; it != NULL; it = it->next) {
+            if (it != &this->actor && it->parent == &this->actor) {
+                Actor_Kill(it);
+            }
+        }
+    }
+}
+
+// Where the fight is centred: the arena's origin in the tower, the spot that follows Link when HiveShock spawned him.
+static Vec3f BossGanon_ArenaCenter(BossGanon* this) {
+    Vec3f center = { 0.0f, 0.0f, 0.0f };
+
+    if (this->hiveShock) {
+        center = this->hiveHome;
+    }
+    return center;
+}
+
 void BossGanon_Destroy(Actor* thisx, PlayState* play) {
     BossGanon* this = (BossGanon*)thisx;
+
+    if ((this->actor.params < 0x64) && this->hiveShock) {
+        BossGanon_HiveShockKillChildren(this, play);
+        sGanondorf = NULL;
+    }
 
     if ((this->actor.params < 0xC8) || (this->actor.params >= 0x104)) {
         Collider_DestroyCylinder(play, &this->collider);
@@ -2273,6 +2320,15 @@ void BossGanon_Wait(BossGanon* this, PlayState* play) {
     s32 pad;
     f32 cos;
     Player* player = GET_PLAYER(play);
+    Vec3f center = BossGanon_ArenaCenter(this);
+
+    if (this->hiveShock) {
+        // Follow Link around instead of keeping to the arena.
+        Math_ApproachF(&this->hiveHome.x, player->actor.world.pos.x, 0.03f, 6.0f);
+        Math_ApproachF(&this->hiveHome.y, player->actor.floorHeight, 0.1f, 6.0f);
+        Math_ApproachF(&this->hiveHome.z, player->actor.world.pos.z, 0.03f, 6.0f);
+        center = this->hiveHome;
+    }
 
     this->legSwayEnabled = true;
 
@@ -2283,9 +2339,10 @@ void BossGanon_Wait(BossGanon* this, PlayState* play) {
 
     SkelAnime_Update(&this->skelAnime);
 
-    if ((this->unk_1C2 == 0) && !(player->actor.world.pos.y < 0.0f)) {
-        if (!(player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) && (fabsf(player->actor.world.pos.x) < 110.0f) &&
-            (fabsf(player->actor.world.pos.z) < 110.0f)) {
+    if ((this->unk_1C2 == 0) && !(player->actor.world.pos.y < center.y - 200.0f)) {
+        if (!(player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
+            (fabsf(player->actor.world.pos.x - center.x) < 110.0f) &&
+            (fabsf(player->actor.world.pos.z - center.z) < 110.0f)) {
             BossGanon_SetupPoundFloor(this, play);
         } else if ((this->timers[0] == 0) && !(player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE)) {
             this->timers[0] = (s16)Rand_ZeroFloat(30.0f) + 30;
@@ -2307,9 +2364,9 @@ void BossGanon_Wait(BossGanon* this, PlayState* play) {
     sin = Math_SinS(this->unk_1A2 * 1280) * 100.0f;
     cos = Math_CosS(this->unk_1A2 * 1792) * 100.0f;
 
-    Math_ApproachF(&this->actor.world.pos.x, sin, 0.05f, this->fwork[GDF_FWORK_0]);
-    Math_ApproachF(&this->actor.world.pos.y, 150.0f, 0.05f, this->fwork[GDF_FWORK_0] * 0.2f);
-    Math_ApproachF(&this->actor.world.pos.z, cos, 0.05f, this->fwork[GDF_FWORK_0]);
+    Math_ApproachF(&this->actor.world.pos.x, center.x + sin, 0.05f, this->fwork[GDF_FWORK_0]);
+    Math_ApproachF(&this->actor.world.pos.y, center.y + 150.0f, 0.05f, this->fwork[GDF_FWORK_0] * 0.2f);
+    Math_ApproachF(&this->actor.world.pos.z, center.z + cos, 0.05f, this->fwork[GDF_FWORK_0]);
     Math_ApproachF(&this->fwork[GDF_FWORK_0], 50.0f, 1.0f, 0.5f);
 
     this->actor.velocity.x = this->actor.world.pos.x - this->actor.prevPos.x;
@@ -2637,8 +2694,8 @@ void BossGanon_Vulnerable(BossGanon* this, PlayState* play) {
             sCape->minDist = 0.0f;
             this->actor.velocity.y = this->actor.velocity.y - 0.5f;
 
-            if (this->actor.world.pos.y < 40.0f) {
-                this->actor.world.pos.y = 40.0f;
+            if (this->actor.world.pos.y < BossGanon_ArenaCenter(this).y + 40.0f) {
+                this->actor.world.pos.y = BossGanon_ArenaCenter(this).y + 40.0f;
                 this->actor.velocity.y = 0.0f;
                 this->unk_1C2 = 3;
                 this->fwork[GDF_FWORK_1] = Animation_GetLastFrame(&gGanondorfLandAnim);
@@ -2695,7 +2752,7 @@ void BossGanon_Vulnerable(BossGanon* this, PlayState* play) {
 
         case 6:
             this->envLightMode = 0;
-            Math_ApproachF(&this->actor.world.pos.y, 200.0f, 0.1f, 1000.0f);
+            Math_ApproachF(&this->actor.world.pos.y, BossGanon_ArenaCenter(this).y + 200.0f, 0.1f, 1000.0f);
 
             if (Animation_OnFrame(&this->skelAnime, this->fwork[GDF_FWORK_1])) {
                 this->unk_1C2 = 7;
@@ -2704,7 +2761,7 @@ void BossGanon_Vulnerable(BossGanon* this, PlayState* play) {
 
         case 7:
             this->envLightMode = 0;
-            Math_ApproachF(&this->actor.world.pos.y, 150.0f, 0.05f, 30.0f);
+            Math_ApproachF(&this->actor.world.pos.y, BossGanon_ArenaCenter(this).y + 150.0f, 0.05f, 30.0f);
             this->fwork[GDF_FWORK_1] = Animation_GetLastFrame(&gGanondorfGetUp3Anim);
             Animation_MorphToPlayOnce(&this->skelAnime, &gGanondorfGetUp3Anim, 0.0f);
             this->unk_1C2 = 8;
@@ -2773,7 +2830,8 @@ void BossGanon_UpdateDamage(BossGanon* this, PlayState* play) {
         acHitInfo = this->collider.info.acHitInfo;
 
         if ((this->actionFunc == BossGanon_HitByLightBall) || (this->actionFunc == BossGanon_ChargeBigMagic)) {
-            if (acHitInfo->toucher.dmgFlags & 0x2000) {
+            // Outside the tower Link may have no Light Arrows, so any hit counts.
+            if ((acHitInfo->toucher.dmgFlags & 0x2000) || this->hiveShock) {
                 BossGanon_SetupVulnerable(this, play);
                 this->timers[2] = 0;
                 Audio_PlayActorSound2(&this->actor, NA_SE_EN_GANON_DAMAGE1);
@@ -2811,6 +2869,13 @@ void BossGanon_UpdateDamage(BossGanon* this, PlayState* play) {
                         sCape->strands[i].velocities[j].x = Rand_CenteredFloat(15.0f);
                         sCape->strands[i].velocities[j].z = Rand_CenteredFloat(15.0f);
                     }
+                }
+
+                if (((s8)this->actor.colChkInfo.health <= 0) && this->hiveShock) {
+                    // No story cutscene: he blows up where he stands.
+                    BossGanon_HiveShockKillChildren(this, play);
+                    HiveShock_BossExplode(play, &this->actor, false);
+                    return;
                 }
 
                 if ((s8)this->actor.colChkInfo.health <= 0) {
@@ -3844,7 +3909,8 @@ void BossGanon_DrawShadowTexture(void* tex, BossGanon* this, PlayState* play) {
 
     if (this->csState < 100) {
         zOffset = (((((this->actor.world.pos.y - 10) + 70.0f) * -5.0f) / 10.0f) + 10.0f);
-        Matrix_Translate(this->actor.world.pos.x, 0.0f, this->actor.world.pos.z + zOffset, MTXMODE_NEW);
+        Matrix_Translate(this->actor.world.pos.x, BossGanon_ArenaCenter(this).y, this->actor.world.pos.z + zOffset,
+                         MTXMODE_NEW);
     } else {
         Matrix_Translate(this->actor.world.pos.x, 4102.0f, this->actor.world.pos.z - 20.0f, MTXMODE_NEW);
     }

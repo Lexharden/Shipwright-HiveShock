@@ -7,6 +7,7 @@
 #include "objects/object_ganon_anime3/object_ganon_anime3.h"
 #include "objects/object_geff/object_geff.h"
 #include "soh/frame_interpolation.h"
+#include "soh/Network/HiveShock/HiveShockBossDeath.h"
 #include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
@@ -123,6 +124,11 @@ void BossGanon2_SetObjectSegment(BossGanon2* this, PlayState* play, s32 objectId
     s32 pad;
     s32 objectIdx = Object_GetIndex(&play->objectCtx, objectId);
 
+    if (objectIdx < 0) {
+        // HiveShock can spawn Ganon in a scene that never loaded these objects. Assets resolve by name, so any slot
+        // is fine for the segment.
+        objectIdx = 0;
+    }
     gSegments[6] = PHYSICAL_TO_VIRTUAL(play->objectCtx.status[objectIdx].segment);
 
     if (setRSPSegment) {
@@ -200,6 +206,23 @@ void BossGanon2_Init(Actor* thisx, PlayState* play) {
     if (IS_RANDO && Randomizer_GetSettingValue(RSK_SHUFFLE_MASTER_SWORD) &&
         !CHECK_OWNED_EQUIP(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_MASTER)) {
         hasFoundMasterSword = 0;
+    }
+
+    if (gHiveShockBossSpawn) {
+        // Straight into the fight as the beast, no cutscenes: the same states the story fight reaches once the
+        // transformation ends.
+        this->hiveShock = true;
+        SkelAnime_Free(&this->skelAnime, play);
+        BossGanon2_SetObjectSegment(this, play, OBJECT_GANON2, false);
+        SkelAnime_InitFlex(play, &this->skelAnime, &gGanonSkel, NULL, NULL, NULL, 0);
+        this->unk_337 = 1;
+        this->unk_335 = 1;
+        this->actor.gravity = -1.0f;
+        this->actor.shape.yOffset = 0.0f;
+        func_808FFDB0(this, play);
+        this->unk_336 = 0;
+        this->unk_1A2[1] = 50;
+        this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED;
     }
 }
 
@@ -1102,6 +1125,10 @@ void func_808FFDB0(BossGanon2* this, PlayState* play) {
     s32 sp28;
     s32 objectIdx = Object_GetIndex(&play->objectCtx, OBJECT_GANON2);
 
+    if (objectIdx < 0) {
+        objectIdx = 0; // HiveShock: object not loaded, assets resolve by name
+    }
+
     if (Object_IsLoaded(&play->objectCtx, objectIdx)) {
         gSegments[6] = PHYSICAL_TO_VIRTUAL(play->objectCtx.status[objectIdx].segment);
         Animation_MorphToLoop(&this->skelAnime, &gGanonGuardIdleAnim, -10.0f);
@@ -1327,6 +1354,13 @@ void func_80900650(BossGanon2* this, PlayState* play) {
 }
 
 void func_80900818(BossGanon2* this, PlayState* play) {
+    if (this->hiveShock) {
+        // The story cutscene that restores him: here he just turns to the furious phase.
+        this->unk_334 = 1;
+        func_80900210(this, play);
+        return;
+    }
+
     Animation_MorphToPlayOnce(&this->skelAnime, &gGanonDownedStartAnim, -5.0f);
     this->unk_194 = Animation_GetLastFrame(&gGanonDownedStartAnim);
     this->actionFunc = func_80900890;
@@ -1490,6 +1524,15 @@ void func_80900890(BossGanon2* this, PlayState* play) {
 }
 
 void func_80901020(BossGanon2* this, PlayState* play) {
+    if (this->hiveShock) {
+        // No death cutscene: he blows up where he stands.
+        play->envCtx.unk_D8 = 0.0f;
+        play->envCtx.unk_BE = 0;
+        play->envCtx.customSkyboxFilter = 0;
+        HiveShock_BossExplode(play, &this->actor, true);
+        return;
+    }
+
     Animation_MorphToPlayOnce(&this->skelAnime, &gGanonDownedStartAnim, -5.0f);
     this->unk_194 = Animation_GetLastFrame(&gGanonDownedStartAnim);
     this->actionFunc = func_8090120C;
@@ -1926,7 +1969,9 @@ void func_80902348(BossGanon2* this, PlayState* play) {
 
                 Actor_SetPlayerKnockbackLarge(play, &this->actor, 15.0f, this->actor.yawTowardsPlayer + phi_v0_2, 2.0f,
                                               0);
-                sZelda->unk_3C8 = 8;
+                if (sZelda != NULL) {
+                    sZelda->unk_3C8 = 8;
+                }
                 this->unk_316 = 10;
                 break;
             }
@@ -1945,7 +1990,9 @@ void func_80902348(BossGanon2* this, PlayState* play) {
 
             player->bodyIsBurning = true;
             Actor_SetPlayerKnockbackLarge(play, &this->actor, 10.0f, Math_Atan2S(temp_f12, temp_f2), 0.0f, 0x10);
-            sZelda->unk_3C8 = 8;
+            if (sZelda != NULL) {
+                    sZelda->unk_3C8 = 8;
+                }
         }
     }
 }
