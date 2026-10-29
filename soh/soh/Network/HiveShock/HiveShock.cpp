@@ -68,6 +68,8 @@
 #include <unistd.h>
 #endif
 
+#include "HiveShockBossDeath.h" // gHiveShockBossSpawn and the slot limits of the Ganon bosses
+
 extern "C" {
 #include <z64.h>
 #include "variables.h"
@@ -75,7 +77,6 @@ extern "C" {
 #include "macros.h"
 extern PlayState* gPlayState;
 extern u16 gTimeSpeed;
-extern int gHiveShockBossSpawn; // z_boss_va.c: tells Barinade's body it is being spawned by HiveShock
 }
 
 #define CVAR_NAME CVAR_REMOTE_HIVESHOCK("Enabled")
@@ -120,6 +121,7 @@ constexpr s32 kOrdinaryFloor = 0;
 constexpr u32 kEliteWaitLogTicks = 100;
 // Retry cadence for a spawn that is held (not allowed here right now) or that failed to place an actor.
 constexpr u32 kHeldRecheckFrames = 10;
+constexpr u32 kHeldLogTicks = 100;
 constexpr u32 kFailedRetryFrames = 20;
 constexpr u32 kCuccoArmyFrameGap = 4;
 // After the room changes, injected enemies that vanish while still alive were dropped by the room swap (not killed),
@@ -250,6 +252,7 @@ std::vector<TrackedEnemy> gTrackedEnemies;
 u32 gTick = 0;
 u32 gNextSpawnTick = 0;
 u32 gLastEliteWaitLogTick = 0;
+u32 gLastHeldLogTick = 0;
 u32 gRoomGraceUntilTick = 0;
 s16 gLastRoom = -1;
 bool gBacklogDirty = false;
@@ -883,11 +886,21 @@ bool ActorStillLoaded(Actor* actor) {
     return false;
 }
 
+bool TrackedStillLoaded(const TrackedEnemy& t);
+
+// Enemies in the scene, the game's own included. The bosses HiveShock injected live in the boss list, so they are added
+// on top: they take the same room as any other enemy.
 s32 CountSceneEnemies() {
     if (gPlayState == nullptr) {
         return 0;
     }
-    return gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].length;
+    s32 count = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].length;
+    for (const TrackedEnemy& t : gTrackedEnemies) {
+        if (t.actor != nullptr && t.actor->category == ACTORCAT_BOSS && TrackedStillLoaded(t)) {
+            count++;
+        }
+    }
+    return count;
 }
 
 s64 UnixNow() {
@@ -920,8 +933,9 @@ void RequeueSurvivors(const std::vector<TrackedEnemy>& survivors) {
     }
 }
 
-// The bosses taken from the vanilla game. Their parts share static state, so only one of Barinade, Ganondorf and
-// Ganon can exist at a time, and their update order must not be shuffled.
+// The bosses taken from the vanilla game. Their parts are separate actors that must keep their update order, so they
+// are never moved in the actor list or relocated. Ganondorf and Ganon keep their file-level state in a slot each, so
+// several of them can exist at once; Barinade has no slots yet and stays one at a time.
 bool IsHiveBoss(s16 actorId) {
     return actorId == ACTOR_BOSS_VA || actorId == ACTOR_BOSS_GANON || actorId == ACTOR_BOSS_GANON2;
 }
@@ -1042,6 +1056,7 @@ void ClearBridgeEnemies() {
         if (TrackedStillLoaded(t)) {
             KillTrackedActor(t.actor);
         }
+        gStatDefeated++;
     }
     gTrackedEnemies.clear();
     SPDLOG_INFO("[HiveShock] cleared bridge enemies");
@@ -1116,28 +1131,87 @@ bool EnqueueEnemySpawn(std::string name, std::string user, u32 delayTicks) {
     return true;
 }
 
-// Whether Barinade, Ganondorf or Ganon (or any part of them) is in the scene.
-bool IsGanonInScene() {
+// Whether Barinade (any part of him) is in the scene.
+bool IsBarinadeInScene() {
     for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
-        if (it->id == ACTOR_BOSS_GANON || it->id == ACTOR_BOSS_GANON2 || it->id == ACTOR_BOSS_VA) {
+        if (it->id == ACTOR_BOSS_VA) {
             return true;
         }
     }
     return false;
 }
 
-// Barinade is made of many actors that point at the body. Killing only the body would leave the others running
-// with a dangling parent, so a Barinade is always removed whole.
+// Whether a Ganondorf or a beast is in the scene. Only the bodies count: the energy balls and lightning Ganondorf
+// throws are BOSS_GANON actors too, and must not make the scene look occupied.
+bool IsGanonInScene() {
+    for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
+        if (it->id == ACTOR_BOSS_GANON2 || (it->id == ACTOR_BOSS_GANON && it->params < 0x64)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// How many live injected enemies of this kind there are.
+s32 CountTrackedOfKind(s16 actorId) {
+    s32 count = 0;
+    for (const TrackedEnemy& t : gTrackedEnemies) {
+        if (t.def != nullptr && t.def->actorId == actorId) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// True when `root` is somewhere up the parent chain of `actor`. The walk is bounded in case of a bad link.
+bool IsDescendantOf(const Actor* actor, const Actor* root) {
+    const Actor* it = actor->parent;
+    for (int depth = 0; it != nullptr && depth < 8; depth++, it = it->parent) {
+        if (it == root) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Kills one actor. A grabber (a Dead Hand's hand, for one) keeps Link held through player->actor.parent and only lets
+// go from its own update, which never runs again once it is killed: Link would stay stuck to an actor that is gone.
+// So he is released first, the same way the hand does it.
+void KillActorReleasingLink(Actor* victim) {
+    Player* player = GET_PLAYER(gPlayState);
+    if (player != nullptr && player->actor.parent == victim) {
+        player->stateFlags2 &= ~PLAYER_STATE2_GRABBED_BY_ENEMY;
+        player->actor.parent = nullptr;
+        player->av2.actionVar2 = 200;
+    }
+    Actor_Kill(victim);
+}
+
+// Removes an injected enemy. Barinade is made of many actors that point at the body: killing only the body would
+// leave the others running with a dangling parent, so a Barinade is always removed whole. The same goes for anything
+// that has the enemy as its parent: Ganondorf's cape and energy balls, a Dead Hand's hands. They are separate actors
+// that draw themselves and would stay on screen until the body's Destroy ran (which waits while Link is dead or the
+// actors are frozen), so the whole tree goes at once.
 void KillTrackedActor(Actor* actor) {
     if (actor->id == ACTOR_BOSS_VA) {
         for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
             if (it->id == ACTOR_BOSS_VA) {
-                Actor_Kill(it);
+                KillActorReleasingLink(it);
             }
         }
         return;
     }
-    Actor_Kill(actor);
+    for (int category = 0; category < ACTORCAT_MAX; category++) {
+        if (category == ACTORCAT_PLAYER) {
+            continue; // Link has whatever grabbed him as his parent; he is not part of its tree
+        }
+        for (Actor* it = gPlayState->actorCtx.actorLists[category].head; it != nullptr; it = it->next) {
+            if (it != actor && IsDescendantOf(it, actor)) {
+                KillActorReleasingLink(it);
+            }
+        }
+    }
+    KillActorReleasingLink(actor);
 }
 
 Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY, s16 rotZ, s32 params) {
@@ -1162,33 +1236,51 @@ Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY,
     return spawned;
 }
 
-bool CanSpawnInCurrentScene(const SpawnDef& def) {
+// Why this spawn cannot happen where Link is, or nullptr if it can. The reason goes to the log: a held spawn is
+// otherwise silent.
+const char* SceneBlockReason(const SpawnDef& def) {
     int16_t sceneNum = gPlayState->sceneNum;
     int16_t roomNum = gPlayState->roomCtx.curRoom.num;
 
     if (sceneNum == SCENE_FOREST_TEMPLE && (roomNum == 12 || roomNum == 13 || roomNum == 16)) {
-        return false;
+        return "this Forest Temple room does not take extra enemies";
     }
     if (def.actorId == ACTOR_BOSS_VA) {
-        // Not in Jabu-Jabu's boss room (the real Barinade shares its state), and never two at once.
-        if (sceneNum == SCENE_JABU_JABU_BOSS || IsGanonInScene()) {
-            return false;
+        // Not in Jabu-Jabu's boss room (the real Barinade shares its state), and one at a time: his many parts keep
+        // their state in file-level variables. He does not share the stage with Ganondorf or Ganon either (their
+        // effect pools and cameras are not meant to run together with his).
+        if (sceneNum == SCENE_JABU_JABU_BOSS) {
+            return "the real Barinade fight lives in this scene";
+        }
+        if (IsBarinadeInScene()) {
+            return "Barinade is already in the scene";
+        }
+        if (IsGanonInScene()) {
+            return "Ganondorf or Ganon is in the scene";
         }
     }
     if (def.actorId == ACTOR_BOSS_GANON || def.actorId == ACTOR_BOSS_GANON2) {
-        // Not where the real fight lives (it shares the static state), and never both forms at once.
-        if (sceneNum == SCENE_GANON_BOSS || sceneNum == SCENE_GANONDORF_BOSS || IsGanonInScene()) {
-            return false;
+        // Not where the real fight lives (it shares the state). Any number of them can share the scene, up to the
+        // slots they have, but not together with Barinade.
+        if (sceneNum == SCENE_GANON_BOSS || sceneNum == SCENE_GANONDORF_BOSS) {
+            return "the real Ganon fight lives in this scene";
+        }
+        if (IsBarinadeInScene()) {
+            return "Barinade is in the scene";
+        }
+        const s32 limit = def.actorId == ACTOR_BOSS_GANON ? HIVESHOCK_MAX_GANONDORF : HIVESHOCK_MAX_GANON_BEAST;
+        if (CountTrackedOfKind(def.actorId) >= limit) {
+            return "all the Ganondorf / Ganon slots are taken";
         }
     }
     if (def.actorId == ACTOR_EN_CLEAR_TAG) {
         if (sceneNum == SCENE_DODONGOS_CAVERN_BOSS || sceneNum == SCENE_WATER_TEMPLE_BOSS ||
             sceneNum == SCENE_SPIRIT_TEMPLE_BOSS || sceneNum == SCENE_GANONDORF_BOSS ||
             sceneNum == SCENE_FISHING_POND || sceneNum == SCENE_GANON_BOSS) {
-            return false;
+            return "Arwings do not fit in this boss room";
         }
     }
-    return true;
+    return nullptr;
 }
 
 // Actors live in one intrusive linked list per category, and Actor_Spawn inserts new ones at the HEAD. Some
@@ -1305,6 +1397,46 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
     return foundFloor;
 }
 
+// A Dead Hand's hands are separate actors that the room normally places around it. They grab Link, and when four of
+// them are beaten the Dead Hand comes up. HiveShock puts them on the floor around Link, away from the spot in front
+// of him where the Dead Hand rises, and makes the Dead Hand their parent so they follow its fate (see
+// KillTrackedActor, and EnDha which dies with its parent).
+constexpr s32 kDeadHandHands = 4;
+
+void SpawnDeadHandHands(Actor* deadHand, Player* player) {
+    static constexpr f32 kRadii[] = { 130.0f, 170.0f, 100.0f, 210.0f };
+    const s16 yawBase = player->actor.shape.rot.y;
+    s32 spawnedHands = 0;
+
+    for (s32 hand = 0; hand < kDeadHandHands; hand++) {
+        const s16 yaw = yawBase + static_cast<s16>(0x2000 + hand * 0x4000); // the diagonals around Link
+        for (f32 radius : kRadii) {
+            Vec3f pos = player->actor.world.pos;
+            pos.x += Math_SinS(yaw) * radius;
+            pos.z += Math_CosS(yaw) * radius;
+
+            // A hand stands on the floor: no void and no ledge far below.
+            CollisionPoly poly;
+            Vec3f rayPos = pos;
+            rayPos.y += 50.0f;
+            const f32 floorY = BgCheck_AnyRaycastFloor1(&gPlayState->colCtx, &poly, &rayPos);
+            if (floorY <= BGCHECK_Y_MIN || fabsf(floorY - player->actor.world.pos.y) > 100.0f) {
+                continue;
+            }
+            pos.y = floorY;
+
+            const s16 faceYaw = Math_Vec3f_Yaw(&pos, &player->actor.world.pos);
+            Actor* spawned = SpawnActorInAnyRoom(ACTOR_EN_DHA, pos.x, pos.y, pos.z, 0, faceYaw, 0, 0);
+            if (spawned != nullptr) {
+                spawned->parent = deadHand;
+                spawnedHands++;
+                break;
+            }
+        }
+    }
+    SPDLOG_INFO("[HiveShock] dead_hand: {} of {} hands placed", spawnedHands, kDeadHandHands);
+}
+
 ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char** whyBlocked = nullptr) {
     if (gPlayState == nullptr) {
         return ApplyResult::Deferred;
@@ -1314,7 +1446,10 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
         return ApplyResult::Deferred;
     }
     // Not allowed in this place (boss rooms): keep the spawn for when Link is somewhere it works.
-    if (!CanSpawnInCurrentScene(def)) {
+    if (const char* sceneBlock = SceneBlockReason(def)) {
+        if (whyBlocked != nullptr) {
+            *whyBlocked = sceneBlock;
+        }
         return ApplyResult::Held;
     }
     // Room still loading, or a cutscene is running: wait rather than spawn into a half-initialised scene.
@@ -1322,6 +1457,9 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
         return ApplyResult::Deferred;
     }
     if (def.actorId == ACTOR_EN_ZF && IsLizalfosMinibossActive()) {
+        if (whyBlocked != nullptr) {
+            *whyBlocked = "the Dodongo's Cavern Lizalfos mini-boss fight is running";
+        }
         return ApplyResult::Held;
     }
     // No room in this lane: wait for an enemy to die instead of removing one.
@@ -1368,6 +1506,7 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
         spawned->world.pos = pos;
         spawned->prevPos = pos;
         spawned->params = ENDH_START_ATTACK_GRAB;
+        SpawnDeadHandHands(spawned, player);
     }
 
     if (def.actorId == ACTOR_EN_AM) {
@@ -1656,6 +1795,11 @@ void TickPendingSpawns() {
                     ++it;
                     break;
                 case ApplyResult::Held:
+                    if (gTick - gLastHeldLogTick >= kHeldLogTicks) {
+                        gLastHeldLogTick = gTick;
+                        SPDLOG_INFO("[HiveShock] '{}' is held: {}", it->name,
+                                    whyBlocked != nullptr ? whyBlocked : "not possible here right now");
+                    }
                     it->earliestTick = gTick + kHeldRecheckFrames;
                     ++it;
                     break;

@@ -108,6 +108,8 @@ typedef struct BossGanon2 {
     /* 0x0864 */ ColliderJntSphElement unk_864[2];
     // HiveShock: spawned as an enemy outside the tower, already in the fight and exploding when beaten.
     u8 hiveShock;
+    // Which state slot this beast uses (0 = the story fight, -1 = never initialised).
+    s8 hiveSlot;
 } BossGanon2;
 
 #endif

@@ -165,6 +165,8 @@ typedef struct BossGanon {
     // Link) and, once beaten, ends in an explosion instead of the story cutscene.
     u8 hiveShock;
     Vec3f hiveHome;
+    // Which state slot this Ganondorf, or the ball he threw, uses (0 = the story fight, -1 = never initialised).
+    s8 hiveSlot;
 } BossGanon;
 
 #endif

@@ -36,6 +36,18 @@ void func_808E324C(Actor* thisx, PlayState* play); // draw
 void BossGanon_LightBall_Draw(Actor* thisx, PlayState* play);
 void BossGanon_Reset(void);
 
+// The real bodies of the callbacks above; the callbacks themselves only select the HiveShock slot (see below).
+void BossGanon_Init_Slotted(Actor* thisx, PlayState* play);
+void BossGanon_Destroy_Slotted(Actor* thisx, PlayState* play);
+void BossGanon_Update_Slotted(Actor* thisx, PlayState* play);
+void BossGanon_Draw_Slotted(Actor* thisx, PlayState* play);
+void func_808E1EB4_Slotted(Actor* thisx, PlayState* play);
+void func_808E2544_Slotted(Actor* thisx, PlayState* play);
+void BossGanon_LightBall_Update_Slotted(Actor* thisx, PlayState* play);
+void func_808E229C_Slotted(Actor* thisx, PlayState* play);
+void func_808E324C_Slotted(Actor* thisx, PlayState* play);
+void BossGanon_LightBall_Draw_Slotted(Actor* thisx, PlayState* play);
+
 void BossGanon_SetupIntroCutscene(BossGanon* this, PlayState* play);
 void BossGanon_SetupTowerCutscene(BossGanon* this, PlayState* play);
 void BossGanon_IntroCutscene(BossGanon* this, PlayState* play);
@@ -136,6 +148,145 @@ static GanondorfEffect sEffects[200];
     F(sCape)                                \
     F(sEffects)
 SHIP_SAVESTATE_DEFINE(BossGanon, BOSS_GANON_SHIP_SAVESTATE_FIELDS)
+
+// HiveShock can have several Ganondorfs at once. The seeds, the cape, Ganondorf himself, Zelda and the effect pool above
+// all belong to ONE fight, so every HiveShock Ganondorf owns a slot with its own copy. Slot 0 is the story fight and
+// keeps using the variables directly. Every callback of a Ganondorf, or of anything he spawned (the energy balls),
+// loads its slot into the variables on entry and stores it back on exit, so the rest of the file keeps reading and
+// writing the variables as it always did. The effect pool is not copied: play->specialEffects is pointed at the slot's
+// own pool while the callback runs and put back afterwards.
+typedef struct {
+    EnGanonMant* cape;
+    s32 seed1;
+    s32 seed2;
+    s32 seed3;
+    BossGanon* ganondorf;
+    EnZl3* zelda;
+    u8 inUse;
+} BossGanonSlot;
+
+typedef struct {
+    s32 slot;
+    void* effects;
+} BossGanonScope;
+
+static BossGanonSlot sSlots[HIVESHOCK_MAX_GANONDORF + 1];
+static GanondorfEffect sHiveEffects[HIVESHOCK_MAX_GANONDORF][200];
+static s32 sCurSlot = 0; // the variables above currently hold the values of this slot
+
+static void BossGanon_StoreSlot(void) {
+    BossGanonSlot* slot = &sSlots[sCurSlot];
+
+    slot->cape = sCape;
+    slot->seed1 = sSeed1;
+    slot->seed2 = sSeed2;
+    slot->seed3 = sSeed3;
+    slot->ganondorf = sGanondorf;
+    slot->zelda = sZelda;
+}
+
+static void BossGanon_LoadSlot(s32 index) {
+    BossGanonSlot* slot = &sSlots[index];
+
+    sCurSlot = index;
+    sCape = slot->cape;
+    sSeed1 = slot->seed1;
+    sSeed2 = slot->seed2;
+    sSeed3 = slot->seed3;
+    sGanondorf = slot->ganondorf;
+    sZelda = slot->zelda;
+}
+
+static BossGanonScope BossGanon_EnterSlot(PlayState* play, s32 index) {
+    BossGanonScope previous = { sCurSlot, play->specialEffects };
+
+    if (index < 0 || index > HIVESHOCK_MAX_GANONDORF) {
+        index = 0;
+    }
+    if (index != sCurSlot) {
+        BossGanon_StoreSlot();
+        BossGanon_LoadSlot(index);
+        play->specialEffects = (index == 0) ? (void*)sEffects : (void*)sHiveEffects[index - 1];
+    }
+    return previous;
+}
+
+static void BossGanon_LeaveSlot(PlayState* play, BossGanonScope previous) {
+    if (sCurSlot != previous.slot) {
+        BossGanon_StoreSlot();
+        BossGanon_LoadSlot(previous.slot);
+        play->specialEffects = previous.effects;
+    }
+}
+
+// Returns the index of a free HiveShock slot (cleared, with an empty effect pool), or -1 when all are taken.
+static s32 BossGanon_AllocHiveSlot(void) {
+    s32 i;
+
+    for (i = 1; i <= HIVESHOCK_MAX_GANONDORF; i++) {
+        if (!sSlots[i].inUse) {
+            memset(&sSlots[i], 0, sizeof(sSlots[i]));
+            memset(sHiveEffects[i - 1], 0, sizeof(sHiveEffects[i - 1]));
+            sSlots[i].inUse = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+#define BOSS_GANON_SLOT_CALLBACK(name)                                                   \
+    void name(Actor* thisx, PlayState* play) {                                           \
+        BossGanonScope scope = BossGanon_EnterSlot(play, ((BossGanon*)thisx)->hiveSlot); \
+        name##_Slotted(thisx, play);                                                     \
+        BossGanon_LeaveSlot(play, scope);                                                \
+    }
+
+BOSS_GANON_SLOT_CALLBACK(BossGanon_Update)
+BOSS_GANON_SLOT_CALLBACK(BossGanon_Draw)
+BOSS_GANON_SLOT_CALLBACK(func_808E1EB4)
+BOSS_GANON_SLOT_CALLBACK(func_808E2544)
+BOSS_GANON_SLOT_CALLBACK(BossGanon_LightBall_Update)
+BOSS_GANON_SLOT_CALLBACK(func_808E229C)
+BOSS_GANON_SLOT_CALLBACK(func_808E324C)
+BOSS_GANON_SLOT_CALLBACK(BossGanon_LightBall_Draw)
+
+// A HiveShock Ganondorf takes a free slot; anything he spawns later (the balls) is created while his slot is loaded and
+// simply inherits it. With no free slot he is removed before being initialised (hiveSlot -1 tells Destroy to skip).
+void BossGanon_Init(Actor* thisx, PlayState* play) {
+    BossGanon* this = (BossGanon*)thisx;
+    s32 slot = sCurSlot;
+    BossGanonScope scope;
+
+    if (thisx->params < 0x64 && gHiveShockBossSpawn != 0) {
+        slot = BossGanon_AllocHiveSlot();
+        if (slot < 0) {
+            this->hiveSlot = -1;
+            Actor_Kill(thisx);
+            return;
+        }
+    }
+    this->hiveSlot = slot;
+
+    scope = BossGanon_EnterSlot(play, slot);
+    BossGanon_Init_Slotted(thisx, play);
+    BossGanon_LeaveSlot(play, scope);
+}
+
+void BossGanon_Destroy(Actor* thisx, PlayState* play) {
+    BossGanon* this = (BossGanon*)thisx;
+    BossGanonScope scope;
+
+    if (this->hiveSlot < 0) {
+        return;
+    }
+
+    scope = BossGanon_EnterSlot(play, this->hiveSlot);
+    BossGanon_Destroy_Slotted(thisx, play);
+    if (thisx->params < 0x64 && this->hiveShock && this->hiveSlot > 0) {
+        sSlots[this->hiveSlot].inUse = 0;
+    }
+    BossGanon_LeaveSlot(play, scope);
+}
 
 static u8 sWindowShatterTex[2048] = { { 0 } };
 
@@ -353,7 +504,7 @@ static InitChainEntry sInitChain[] = {
     ICHAIN_F32(targetArrowOffset, 0, ICHAIN_STOP),
 };
 
-void BossGanon_Init(Actor* thisx, PlayState* play2) {
+void BossGanon_Init_Slotted(Actor* thisx, PlayState* play2) {
     s16 i;
     PlayState* play = play2;
     BossGanon* this = (BossGanon*)thisx;
@@ -369,10 +520,12 @@ void BossGanon_Init(Actor* thisx, PlayState* play2) {
         if (!hiveShock) {
             Flags_SetSwitch(play, 0x14);
         }
-        play->specialEffects = sEffects;
+        if (!hiveShock) {
+            play->specialEffects = sEffects;
+        } // a HiveShock Ganondorf was already pointed at his slot's pool when he entered it
 
         for (i = 0; i < ARRAY_COUNT(sEffects); i++) {
-            sEffects[i].type = GDF_EFF_NONE;
+            ((GanondorfEffect*)play->specialEffects)[i].type = GDF_EFF_NONE;
         }
 
         sGanondorf = this;
@@ -536,7 +689,7 @@ static s32 BossGanon_BallOutOfArea(BossGanon* dorf, Vec3f* pos, f32 margin) {
            (pos->y > 450.0f);
 }
 
-void BossGanon_Destroy(Actor* thisx, PlayState* play) {
+void BossGanon_Destroy_Slotted(Actor* thisx, PlayState* play) {
     BossGanon* this = (BossGanon*)thisx;
 
     if ((this->actor.params < 0x64) && this->hiveShock) {
@@ -2932,7 +3085,7 @@ static f32 D_808E4D44[] = {
     1.0f, 3.0f, 0.0f, 7.0f, 13.0f, 4.0f, 6.0f, 11.0f, 5.0f, 2.0f, 8.0f, 14.0f, 10.0f, 12.0f, 9.0f,
 };
 
-void BossGanon_Update(Actor* thisx, PlayState* play2) {
+void BossGanon_Update_Slotted(Actor* thisx, PlayState* play2) {
     BossGanon* this = (BossGanon*)thisx;
     PlayState* play = play2;
     f32 legRotX;
@@ -3947,7 +4100,7 @@ void BossGanon_DrawShadowTexture(void* tex, BossGanon* this, PlayState* play) {
     CLOSE_DISPS(gfxCtx);
 }
 
-void BossGanon_Draw(Actor* thisx, PlayState* play) {
+void BossGanon_Draw_Slotted(Actor* thisx, PlayState* play) {
     s32 i;
     BossGanon* this = (BossGanon*)thisx;
     void* shadowTex;
@@ -4026,7 +4179,7 @@ s32 BossGanon_CheckFallingPlatforms(BossGanon* this, PlayState* play, Vec3f* che
     return 0;
 }
 
-void BossGanon_LightBall_Update(Actor* thisx, PlayState* play2) {
+void BossGanon_LightBall_Update_Slotted(Actor* thisx, PlayState* play2) {
     u8 hitWithBottle;
     s16 i;
     s16 spBA = 0;
@@ -4299,7 +4452,7 @@ void BossGanon_LightBall_Update(Actor* thisx, PlayState* play2) {
     }
 }
 
-void BossGanon_LightBall_Draw(Actor* thisx, PlayState* play) {
+void BossGanon_LightBall_Draw_Slotted(Actor* thisx, PlayState* play) {
     BossGanon* this = (BossGanon*)thisx;
     s16 i;
     f32 alpha;
@@ -4349,7 +4502,7 @@ void BossGanon_LightBall_Draw(Actor* thisx, PlayState* play) {
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
-void func_808E1EB4(Actor* thisx, PlayState* play2) {
+void func_808E1EB4_Slotted(Actor* thisx, PlayState* play2) {
     s16 i;
     BossGanon* this = (BossGanon*)thisx;
     PlayState* play = play2;
@@ -4446,7 +4599,7 @@ void func_808E1EB4(Actor* thisx, PlayState* play2) {
     }
 }
 
-void func_808E229C(Actor* thisx, PlayState* play2) {
+void func_808E229C_Slotted(Actor* thisx, PlayState* play2) {
     BossGanon* this = (BossGanon*)thisx;
     PlayState* play = play2;
     s16 i;
@@ -4472,7 +4625,7 @@ void func_808E229C(Actor* thisx, PlayState* play2) {
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
-void func_808E2544(Actor* thisx, PlayState* play) {
+void func_808E2544_Slotted(Actor* thisx, PlayState* play) {
     u8 numEffects = 0;
     s16 xRot;
     f32 xDiff;
@@ -4722,7 +4875,7 @@ static Gfx* sBigMagicLightStreakDLists[] = {
     gGanondorfLightStreak4DL,  gGanondorfLightStreak3DL,  gGanondorfLightStreak2DL,  gGanondorfLightStreak1DL,
 };
 
-void func_808E324C(Actor* thisx, PlayState* play) {
+void func_808E324C_Slotted(Actor* thisx, PlayState* play) {
     BossGanon* this = (BossGanon*)thisx;
     Mtx* mtx;
     s16 i;
@@ -5202,4 +5355,6 @@ void BossGanon_Reset(void) {
     sZelda = NULL;
     sCape = NULL;
     memset(sEffects, 0, sizeof(sEffects));
+    memset(sSlots, 0, sizeof(sSlots));
+    sCurSlot = 0;
 }
