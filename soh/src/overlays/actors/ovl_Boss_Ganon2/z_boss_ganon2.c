@@ -212,6 +212,7 @@ void BossGanon2_Init(Actor* thisx, PlayState* play) {
         // Straight into the fight as the beast, no cutscenes: the same states the story fight reaches once the
         // transformation ends.
         this->hiveShock = true;
+        this->actor.world.pos = this->actor.home.pos; // func_808FD5C4 above buried him at y = -3000
         SkelAnime_Free(&this->skelAnime, play);
         BossGanon2_SetObjectSegment(this, play, OBJECT_GANON2, false);
         SkelAnime_InitFlex(play, &this->skelAnime, &gGanonSkel, NULL, NULL, NULL, 0);
@@ -1258,7 +1259,10 @@ void func_80900344(BossGanon2* this, PlayState* play) {
         Audio_PlayActorSound2(&this->actor, NA_SE_EN_MGANON_UNARI);
     }
 
-    Math_ApproachF(&this->unk_324, 255.0f, 1.0f, 10.0f);
+    if (!this->hiveShock) {
+        // The ring of fire closes the tower's arena; there is no arena here.
+        Math_ApproachF(&this->unk_324, 255.0f, 1.0f, 10.0f);
+    }
 
     if (this->unk_338 != 0) {
         if (Animation_OnFrame(&this->skelAnime, 13.0f)) {
