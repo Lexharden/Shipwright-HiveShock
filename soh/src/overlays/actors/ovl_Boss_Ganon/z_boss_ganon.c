@@ -523,6 +523,19 @@ static Vec3f BossGanon_ArenaCenter(BossGanon* this) {
     return center;
 }
 
+// Whether an energy ball has left the fight area: the tower's walls and ceiling, or a radius around the spot the
+// fight is centred on when HiveShock spawned him (the balls used to burst on the spot, far from the tower's origin).
+static s32 BossGanon_BallOutOfArea(BossGanon* dorf, Vec3f* pos, f32 margin) {
+    if (dorf->hiveShock) {
+        return (fabsf(pos->x - dorf->hiveHome.x) > (900.0f + margin)) ||
+               (fabsf(pos->z - dorf->hiveHome.z) > (900.0f + margin)) || (pos->y < dorf->hiveHome.y - 300.0f) ||
+               (pos->y > dorf->hiveHome.y + 900.0f);
+    }
+
+    return (fabsf(pos->x) > (465.0f + margin)) || (fabsf(pos->z) > (465.0f + margin)) || (pos->y < 0.0f) ||
+           (pos->y > 450.0f);
+}
+
 void BossGanon_Destroy(Actor* thisx, PlayState* play) {
     BossGanon* this = (BossGanon*)thisx;
 
@@ -2340,9 +2353,11 @@ void BossGanon_Wait(BossGanon* this, PlayState* play) {
     SkelAnime_Update(&this->skelAnime);
 
     if ((this->unk_1C2 == 0) && !(player->actor.world.pos.y < center.y - 200.0f)) {
+        // In the tower Link standing near the middle gets the floor pound; here that is Link standing near him.
         if (!(player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
-            (fabsf(player->actor.world.pos.x - center.x) < 110.0f) &&
-            (fabsf(player->actor.world.pos.z - center.z) < 110.0f)) {
+            (this->hiveShock ? (this->actor.xzDistToPlayer < 110.0f)
+                             : ((fabsf(player->actor.world.pos.x) < 110.0f) &&
+                                (fabsf(player->actor.world.pos.z) < 110.0f)))) {
             BossGanon_SetupPoundFloor(this, play);
         } else if ((this->timers[0] == 0) && !(player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE)) {
             this->timers[0] = (s16)Rand_ZeroFloat(30.0f) + 30;
@@ -2361,8 +2376,14 @@ void BossGanon_Wait(BossGanon* this, PlayState* play) {
         }
     }
 
-    sin = Math_SinS(this->unk_1A2 * 1280) * 100.0f;
-    cos = Math_CosS(this->unk_1A2 * 1792) * 100.0f;
+    if (this->hiveShock) {
+        // A slow circle around Link, out of reach of the floor pound, so he has room to throw his energy balls.
+        sin = Math_SinS(this->unk_1A2 * 300) * 260.0f;
+        cos = Math_CosS(this->unk_1A2 * 300) * 260.0f;
+    } else {
+        sin = Math_SinS(this->unk_1A2 * 1280) * 100.0f;
+        cos = Math_CosS(this->unk_1A2 * 1792) * 100.0f;
+    }
 
     Math_ApproachF(&this->actor.world.pos.x, center.x + sin, 0.05f, this->fwork[GDF_FWORK_0]);
     Math_ApproachF(&this->actor.world.pos.y, center.y + 150.0f, 0.05f, this->fwork[GDF_FWORK_0] * 0.2f);
@@ -4211,12 +4232,16 @@ void BossGanon_LightBall_Update(Actor* thisx, PlayState* play2) {
             BossGanonEff_SpawnSparkle(play, &sp94, &spAC, &spA0, Rand_ZeroFloat(500.0f) + 700.0f, 0x1E);
         }
 
-        if (this->actor.world.pos.y < 10.0f) {
+        if ((this->actor.world.pos.y < 10.0f) || ganondorf->hiveShock) {
             Actor_UpdateBgCheckInfo(play, &this->actor, 0.0f, 20.0f, 20.0f, 4);
         }
 
-        if ((fabsf(this->actor.world.pos.x) > 465.0f) || (this->actor.world.pos.y > 500.0f) ||
-            (fabsf(this->actor.world.pos.z) > 465.0f)) {
+        if (ganondorf->hiveShock) {
+            if (BossGanon_BallOutOfArea(ganondorf, &this->actor.world.pos, 0.0f)) {
+                spBA = 4;
+            }
+        } else if ((fabsf(this->actor.world.pos.x) > 465.0f) || (this->actor.world.pos.y > 500.0f) ||
+                   (fabsf(this->actor.world.pos.z) > 465.0f)) {
             spBA = 4;
         }
 
@@ -4667,9 +4692,7 @@ void func_808E2544(Actor* thisx, PlayState* play) {
     if (this->unk_1C2 >= 0xB) {
         xzDist = (this->unk_1C2 == 0xC) ? -65.0f : 0.0f;
 
-        if ((fabsf(this->actor.world.pos.x) > (465.0f + xzDist)) ||
-            (fabsf(this->actor.world.pos.z) > (465.0f + xzDist)) || ((this->actor.world.pos.y < 0.0f)) ||
-            (this->actor.world.pos.y > 450.0f)) {
+        if (BossGanon_BallOutOfArea(dorf, &this->actor.world.pos, xzDist)) {
             this->unk_1C2 = 1;
             this->actor.speedXZ = 0.0f;
             numEffects = 10;
