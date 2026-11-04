@@ -333,6 +333,9 @@ constexpr WarpAlias kWarpAliases[] = {
     { "home", ENTR_LINKS_HOUSE_CHILD_SPAWN },
     { "links_house", ENTR_LINKS_HOUSE_CHILD_SPAWN },
     { "minuet", ENTR_SACRED_FOREST_MEADOW_WARP_PAD },
+    // Birova (Twinrova): the second phase of the fight, started straight away around Link wherever he is (see the
+    // gHiveShockBossSpawn notes in z_boss_tw.c). Params 2 is Twinrova herself; she brings her sisters, hidden.
+    { "birova", ACTOR_BOSS_TW, 2, false, 8 },
     { "forest", ENTR_SACRED_FOREST_MEADOW_WARP_PAD },
     { "woodfall", ENTR_SACRED_FOREST_MEADOW_WARP_PAD },
     { "sacred_forest_meadow", ENTR_SACRED_FOREST_MEADOW_WARP_PAD },
@@ -874,6 +877,9 @@ bool IsTrackedSpawnName(const std::string& name) {
 bool ActorStillLoaded(Actor* actor) {
     if (actor == nullptr || actor->update == nullptr || gPlayState == nullptr) {
         return false;
+    if (out == "twinrova") {
+        return "birova";
+    }
     }
     if (actor->category >= ACTORCAT_MAX) {
         return false;
@@ -937,7 +943,8 @@ void RequeueSurvivors(const std::vector<TrackedEnemy>& survivors) {
 // are never moved in the actor list or relocated. Ganondorf and Ganon keep their file-level state in a slot each, so
 // several of them can exist at once; Barinade has no slots yet and stays one at a time.
 bool IsHiveBoss(s16 actorId) {
-    return actorId == ACTOR_BOSS_VA || actorId == ACTOR_BOSS_GANON || actorId == ACTOR_BOSS_GANON2;
+    return actorId == ACTOR_BOSS_VA || actorId == ACTOR_BOSS_GANON || actorId == ACTOR_BOSS_GANON2 ||
+           actorId == ACTOR_BOSS_TW;
 }
 
 bool TrackedStillLoaded(const TrackedEnemy& t) {
@@ -1193,9 +1200,10 @@ void KillActorReleasingLink(Actor* victim) {
 // that draw themselves and would stay on screen until the body's Destroy ran (which waits while Link is dead or the
 // actors are frozen), so the whole tree goes at once.
 void KillTrackedActor(Actor* actor) {
-    if (actor->id == ACTOR_BOSS_VA) {
+    if (actor->id == ACTOR_BOSS_VA || actor->id == ACTOR_BOSS_TW) {
+        // Twinrova's sisters point at each other, not at her, so her tree cannot be found by parent either.
         for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
-            if (it->id == ACTOR_BOSS_VA) {
+            if (it->id == actor->id) {
                 KillActorReleasingLink(it);
             }
         }
@@ -1239,6 +1247,16 @@ Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY,
 // Why this spawn cannot happen where Link is, or nullptr if it can. The reason goes to the log: a held spawn is
 // otherwise silent.
 const char* SceneBlockReason(const SpawnDef& def) {
+// Whether Twinrova (or her sisters, or a blast of hers) is in the scene.
+bool IsTwinrovaInScene() {
+    for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
+        if (it->id == ACTOR_BOSS_TW) {
+            return true;
+        }
+    }
+    return false;
+}
+
     int16_t sceneNum = gPlayState->sceneNum;
     int16_t roomNum = gPlayState->roomCtx.curRoom.num;
 
@@ -1385,6 +1403,22 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
         }
     }
     if (def.actorId == ACTOR_EN_CLEAR_TAG || def.actorId == ACTOR_EN_FIREFLY || def.actorId == ACTOR_EN_BILI) {
+        if (IsTwinrovaInScene()) {
+            return "Birova is in the scene";
+        }
+    }
+    if (def.actorId == ACTOR_BOSS_TW) {
+        // One at a time, and not together with the other bosses: her blasts, her effect pool and her light flashes
+        // are shared state, like Barinade's.
+        if (sceneNum == SCENE_SPIRIT_TEMPLE_BOSS) {
+            return "the real Birova fight lives in this scene";
+        }
+        if (IsTwinrovaInScene()) {
+            return "Birova is already in the scene";
+        }
+        if (IsBarinadeInScene() || IsGanonInScene()) {
+            return "another boss is in the scene";
+        }
         pos.y += 100.0f;
     }
     if (def.actorId == ACTOR_EN_NIW) {
@@ -1395,6 +1429,9 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
         pos.y += 40.0f;
     }
     return foundFloor;
+        if (IsTwinrovaInScene()) {
+            return "Birova is in the scene";
+        }
 }
 
 // A Dead Hand's hands are separate actors that the room normally places around it. They grab Link, and when four of

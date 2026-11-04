@@ -11,6 +11,7 @@
 #include "textures/boss_title_cards/object_bv.h"
 #include "objects/object_bv/object_bv.h"
 #include "overlays/actors/ovl_En_Boom/z_en_boom.h"
+#include "overlays/actors/ovl_En_Arrow/z_en_arrow.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
 
 #include "soh/OTRGlobals.h"
@@ -410,6 +411,20 @@ static s8 sPhase4HP;
 int gHiveShockBossSpawn = 0;
 static u8 sHiveShock = 0;
 
+// In HiveShock the slingshot stuns Barinade the way the boomerang does (the real fight needs the boomerang; a random
+// scene may not even have it). Damage-type bits: boomerang 0x10, slingshot 0x04.
+#define BOSSVA_STUN_FLAGS (sHiveShock ? 0x14 : 0x10)
+
+static s32 BossVa_IsStunItem(Actor* actor) {
+    if (actor->id == ACTOR_EN_BOOM) {
+        return true;
+    }
+    return sHiveShock && actor->id == ACTOR_EN_ARROW && actor->params == ARROW_SEED;
+}
+
+// The damage table the HiveShock body uses: the same as the real one, with the slingshot stunning like the boomerang.
+static DamageTable sHiveDamageTable;
+
 #define BOSS_VA_SHIP_SAVESTATE_FIELDS(F) \
     F(sKillBari)                         \
     F(sBodyBari)                         \
@@ -681,7 +696,13 @@ void BossVa_Init(Actor* thisx, PlayState* play2) {
                 sDoorState = 100;
                 Actor_Kill(&this->actor);
             } else {
-                this->actor.colChkInfo.damageTable = sDamageTable;
+                if (sHiveShock) {
+                    sHiveDamageTable = sDamageTable[0];
+                    sHiveDamageTable.table[2] = DMG_ENTRY(0, 0x1); // slingshot, as the boomerang
+                    this->actor.colChkInfo.damageTable = &sHiveDamageTable;
+                } else {
+                    this->actor.colChkInfo.damageTable = sDamageTable;
+                }
                 sPhase2Timer = 0xFFFF;
                 if (sHiveShock) {
                     // Straight into the fight, the same state the rando "no soul" fight starts in.
@@ -732,6 +753,7 @@ void BossVa_Init(Actor* thisx, PlayState* play2) {
                 this->zapHeadPos.x = 1.0f;
                 Collider_InitCylinder(play, &this->colliderBody);
                 Collider_SetCylinder(play, &this->colliderBody, &this->actor, &sCylinderInit);
+                this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
 
                 for (i = BOSSVA_ZAPPER_3; i >= BOSSVA_SUPPORT_1; i--) {
                     Actor_SpawnAsChild(
@@ -1187,14 +1209,14 @@ void BossVa_BodyPhase2(BossVa* this, PlayState* play) {
             Actor_SetColorFilter(&this->actor, 0, 255, 0, 160);
             this->actor.colorFilterTimer = this->invincibilityTimer;
         } else {
-            this->colliderBody.info.bumper.dmgFlags = 0x10;
+            this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
         }
     }
 
     if (this->colliderBody.base.acFlags & AC_HIT) {
         this->colliderBody.base.acFlags &= ~AC_HIT;
 
-        if (this->colliderBody.base.ac->id == ACTOR_EN_BOOM) {
+        if (BossVa_IsStunItem(this->colliderBody.base.ac)) {
             sPhase2Timer &= 0xFE00;
             Actor_SetColorFilter(&this->actor, 0, 255, 0, 160);
             this->colliderBody.info.bumper.dmgFlags = 0xFC00712;
@@ -1275,7 +1297,7 @@ void BossVa_BodyPhase2(BossVa* this, PlayState* play) {
 }
 
 void BossVa_SetupBodyPhase3(BossVa* this) {
-    this->colliderBody.info.bumper.dmgFlags = 0x10;
+    this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
     this->actor.speedXZ = 0.0f;
     sPhase3StopMoving = false;
     BossVa_SetupAction(this, BossVa_BodyPhase3);
@@ -1480,7 +1502,7 @@ void BossVa_BodyPhase4(BossVa* this, PlayState* play) {
             }
             Math_SmoothStepToF(&this->actor.speedXZ, ((sFightPhase - PHASE_4 + 1) * 1.5f) + 4.0f, 1.0f, 0.25f, 0.0f);
         }
-        this->colliderBody.info.bumper.dmgFlags = 0x10;
+        this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
     } else {
         Math_SmoothStepToS(&this->vaBodySpinRate, 0, 1, 0x96, 0);
         if (this->timer > 0) {
