@@ -312,11 +312,8 @@ constexpr SpawnDef kSpawnTable[] = {
     { "dinolfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFE, false, 3 },
     { "lizalfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFF, false, 3 },
     { "iron_knuckle", ACTOR_EN_IK, 2, false, 4 },
-    { "garo", ACTOR_EN_TEST, 2, false, 3 },
-    { "garo_master", ACTOR_EN_IK, 2, false, 4 },
     { "wallmaster", ACTOR_EN_WALLMAS, 0, false, 2 },
     { "floormaster", ACTOR_EN_FLOORMAS, 0, false, 3 },
-    { "eyegore", ACTOR_EN_IK, 2, false, 4 },
     { "dark_link", ACTOR_EN_TORCH2, 0, false, 4 },
     { "arwing", ACTOR_EN_CLEAR_TAG, 1, false, 2 },
     // Mini-bosses and dungeon enemies. Same params the enemy randomizer already spawns outside their rooms.
