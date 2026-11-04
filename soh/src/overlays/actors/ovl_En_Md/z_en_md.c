@@ -431,6 +431,14 @@ u16 EnMd_GetTextLostWoods(PlayState* play, EnMd* this) {
 u16 EnMd_GetText(PlayState* play, Actor* thisx) {
     EnMd* this = (EnMd*)thisx;
 
+    if (this->hiveShock) {
+        // HiveShock's Mido can be anywhere, and a text id of 0 would leave Link stuck talking with no textbox. Always
+        // the same text, one that sets no story flag and does not make Mido walk away.
+        this->messageEntry = 0;
+        this->messageState = TEXT_STATE_NONE;
+        return 0x1030;
+    }
+
     switch (play->sceneNum) {
         case SCENE_KOKIRI_FOREST:
             return EnMd_GetTextKokiriForest(play, this);

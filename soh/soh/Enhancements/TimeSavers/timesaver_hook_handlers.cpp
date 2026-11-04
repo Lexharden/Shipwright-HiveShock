@@ -6,6 +6,7 @@
 #include "soh/Enhancements/randomizer/SeedContext.h"
 #include "soh/Enhancements/randomizer/randomizer_entrance.h"
 #include "soh/ShipInit.hpp"
+#include "soh/Network/HiveShock/HiveShock.h"
 
 extern "C" {
 #include "src/overlays/actors/ovl_En_Wonder_Talk2/z_en_wonder_talk2.h"
@@ -550,8 +551,12 @@ void TimeSaverOnVanillaBehaviorHandler(GIVanillaBehavior id, bool* should, va_li
             break;
         }
         case VB_OWL_INTERACTION: {
+            EnOwl* hiveOwl = va_arg(args, EnOwl*);
+            if (HiveShock_IsPestActor(&hiveOwl->actor)) {
+                break; // the owl HiveShock sends talks no matter what
+            }
             if (CVarGetInteger(CVAR_ENHANCEMENT("TimeSavers.SkipOwlInteractions"), IS_RANDO) && *should) {
-                EnOwl* enOwl = va_arg(args, EnOwl*);
+                EnOwl* enOwl = hiveOwl;
                 s32 owlType = (enOwl->actor.params & 0xFC0) >> 6;
 
                 if (((enOwl->actor.params & 0xFC0) >> 6) == 1) {

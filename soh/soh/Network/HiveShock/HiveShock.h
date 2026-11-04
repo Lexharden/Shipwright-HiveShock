@@ -42,6 +42,11 @@ extern "C" {
 
 float HiveShock_GetOutgoingDamageMultiplier(void);
 
+// Whether this actor is a Kaepora or a Mido that HiveShock sent (see the "pests" in HiveShock.cpp). The game's own
+// owl and Mido code asks, to behave differently for them.
+struct Actor;
+int HiveShock_IsPestActor(const struct Actor* actor);
+
 #ifdef __cplusplus
 }
 #endif
