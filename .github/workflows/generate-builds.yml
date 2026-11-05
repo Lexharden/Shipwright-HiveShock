@@ -54,7 +54,7 @@ jobs:
   build-macos:
     needs: generate-soh-otr
     if: ${{ github.event_name != 'pull_request' }}
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
     - name: Git Checkout
       uses: actions/checkout@v7
@@ -98,7 +98,15 @@ jobs:
   build-linux:
     needs: generate-soh-otr
     if: ${{ github.event_name != 'pull_request' }}
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
     - name: Git Checkout
       uses: actions/checkout@v7
@@ -114,18 +122,18 @@ jobs:
         max-size: "2G"
         evict-old-files: job
         save: ${{ github.ref_name == github.event.repository.default_branch }}
-        key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+        key: ${{ runner.os }}-${{ matrix.arch }}-ccache-${{ github.ref }}-${{ github.sha }}
         restore-keys: |
-          ${{ runner.os }}-ccache-${{ github.ref }}
-          ${{ runner.os }}-ccache
+          ${{ runner.os }}-${{ matrix.arch }}-ccache-${{ github.ref }}
+          ${{ runner.os }}-${{ matrix.arch }}-ccache
     - name: Restore Cached deps folder
       id: restore-cache-deps
       uses: actions/cache/restore@v5
       with:
-        key: ${{ runner.os }}-deps-${{ github.ref }}-${{ github.sha }}
+        key: ${{ runner.os }}-${{ matrix.arch }}-deps-${{ github.ref }}-${{ github.sha }}
         restore-keys: |
-          ${{ runner.os }}-deps-${{ github.ref }}-
-          ${{ runner.os }}-deps-
+          ${{ runner.os }}-${{ matrix.arch }}-deps-${{ github.ref }}-
+          ${{ runner.os }}-${{ matrix.arch }}-deps-
         path: deps
     - name: Create deps folder
       run: mkdir -p deps
@@ -143,10 +151,10 @@ jobs:
         ./configure --enable-hidapi-libusb
         make -j 10
         sudo make install
-        sudo cp -av /usr/local/lib/libSDL* /lib/x86_64-linux-gnu/
+        sudo cp -av /usr/local/lib/libSDL* /lib/${{ matrix.arch }}-linux-gnu/
     - uses: ./.github/actions/install-sdl2-net
     - name: Copy SDL libs to multiarch dir
-      run: sudo cp -av /usr/local/lib/libSDL* /lib/x86_64-linux-gnu/
+      run: sudo cp -av /usr/local/lib/libSDL* /lib/${{ matrix.arch }}-linux-gnu/
     - name: Remove distro tinyxml2
       run: sudo apt-get remove libtinyxml2-dev
     - uses: ./.github/actions/install-tinyxml2
@@ -163,7 +171,7 @@ jobs:
         cmake .. -DENABLE_COMMONCRYPTO=OFF -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_OPENSSL=OFF
         make
         sudo make install
-        sudo cp -av /usr/local/lib/libzip* /lib/x86_64-linux-gnu/
+        sudo cp -av /usr/local/lib/libzip* /lib/${{ matrix.arch }}-linux-gnu/
     - name: Download soh.o2r
       uses: actions/download-artifact@v8
       with:
@@ -175,7 +183,6 @@ jobs:
         cmake --build build-cmake --config Release -j4
         (cd build-cmake && cpack -G External)
 
-        mv README.md readme.txt
         mv build-cmake/*.appimage soh.appimage
       env:
         CC: gcc-12
@@ -183,10 +190,8 @@ jobs:
     - name: Upload build
       uses: actions/upload-artifact@v7
       with:
-        name: soh-linux
-        path: |
-          soh.appimage
-          readme.txt
+        name: soh-linux-${{ matrix.arch }}
+        path: soh.appimage
     - name: Save Cache deps folder
       if: ${{ github.ref_name == github.event.repository.default_branch }}
       uses: actions/cache/save@v5

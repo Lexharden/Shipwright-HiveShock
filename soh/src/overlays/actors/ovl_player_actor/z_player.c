@@ -21,9 +21,8 @@
 #include "objects/gameplay_keep/gameplay_keep.h"
 #include "objects/object_link_child/object_link_child.h"
 #include <soh/Enhancements/custom-message/CustomMessageTypes.h>
+#include "soh/Enhancements/game-interactor/vanilla-behavior/GIVanillaBehavior.h"
 #include "soh/Enhancements/item-tables/ItemTableTypes.h"
-#include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
-#include "soh/Enhancements/enhancementTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/randomizer/randomizer_entrance.h"
@@ -1610,6 +1609,10 @@ void Player_AnimPlayOnceAdjusted(PlayState* play, Player* this, LinkAnimationHea
 }
 
 void Player_ApplyYawFromAnim(Player* this) {
+    // Blending big turn squishes model, skip it
+    if (ABS(this->skelAnime.jointTable[1].y) > 0x4000) {
+        FrameInterpolation_DontInterpolateChild(&this->actor);
+    }
     this->actor.shape.rot.y += this->skelAnime.jointTable[1].y;
     this->skelAnime.jointTable[1].y = 0;
 }
@@ -14380,18 +14383,20 @@ void Player_Action_8084EAC0(Player* this, PlayState* play) {
                     gSaveContext.healthAccumulator = rand * FULL_HEART_HEALTH;
                 }
             } else {
-                s32 sp28 = D_808549FC[this->itemAction - PLAYER_IA_BOTTLE_POTION_RED];
+                if (GameInteractor_Should(VB_EMPTY_BOTTLE_OI, this->itemAction != PLAYER_IA_BOTTLE)) {
+                    s32 sp28 = D_808549FC[this->itemAction - PLAYER_IA_BOTTLE_POTION_RED];
 
-                if (sp28 & 1) {
-                    gSaveContext.healthAccumulator = MAX_HEALTH;
-                }
+                    if (sp28 & 1) {
+                        gSaveContext.healthAccumulator = MAX_HEALTH;
+                    }
 
-                if (sp28 & 2) {
-                    Magic_Fill(play);
-                }
+                    if (sp28 & 2) {
+                        Magic_Fill(play);
+                    }
 
-                if (sp28 & 4) {
-                    gSaveContext.healthAccumulator = 0x50;
+                    if (sp28 & 4) {
+                        gSaveContext.healthAccumulator = 0x50;
+                    }
                 }
             }
 
