@@ -46,7 +46,11 @@ jobs:
         ls -l release
     - name: Create GitHub Release
       run: |
+        # A tag with a suffix (v1.0.7-rc1) is published as a pre-release, so it can be tested without becoming the
+        # latest version.
+        PRERELEASE=""
+        if [[ "$TAG" == *-* ]]; then PRERELEASE="--prerelease"; fi
         gh release create "$TAG" release/* \
           --repo "${{ github.repository }}" \
           --title "Shipwright-HiveShock $TAG" \
-          --generate-notes
+          --generate-notes $PRERELEASE

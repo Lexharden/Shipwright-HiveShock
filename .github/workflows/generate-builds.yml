@@ -1,8 +1,15 @@
 name: generate-builds
+# Builds only when it matters: pull requests into main (Windows only, as a quick check), the release workflow (every
+# platform, via workflow_call) and by hand. Plain pushes to a branch do not build.
 on:
-  push:
   pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
   workflow_call:
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -46,6 +53,7 @@ jobs:
 
   build-macos:
     needs: generate-soh-otr
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-14
     steps:
     - name: Git Checkout
@@ -89,6 +97,7 @@ jobs:
 
   build-linux:
     needs: generate-soh-otr
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-22.04
     steps:
     - name: Git Checkout
