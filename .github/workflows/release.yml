@@ -32,17 +32,23 @@ jobs:
       with:
         name: soh-mac
         path: soh-mac
-    - name: Download Linux build
+    - name: Download Linux x86_64 build
       uses: actions/download-artifact@v8
       with:
-        name: soh-linux
-        path: soh-linux
+        name: soh-linux-x86_64
+        path: soh-linux-x86_64
+    - name: Download Linux aarch64 build
+      uses: actions/download-artifact@v8
+      with:
+        name: soh-linux-aarch64
+        path: soh-linux-aarch64
     - name: Package release files
       run: |
         mkdir release
         (cd soh-windows && zip -r "../release/Shipwright-HiveShock-${TAG}-Win64.zip" .)
         cp soh-mac/SoH.dmg "release/Shipwright-HiveShock-${TAG}-macOS.dmg"
-        cp soh-linux/soh.appimage "release/Shipwright-HiveShock-${TAG}-Linux.appimage"
+        cp soh-linux-x86_64/soh.appimage "release/Shipwright-HiveShock-${TAG}-Linux-x86_64.appimage"
+        cp soh-linux-aarch64/soh.appimage "release/Shipwright-HiveShock-${TAG}-Linux-aarch64.appimage"
         ls -l release
     - name: Create GitHub Release
       run: |
