@@ -11,6 +11,7 @@
 #include "textures/boss_title_cards/object_bv.h"
 #include "objects/object_bv/object_bv.h"
 #include "overlays/actors/ovl_En_Boom/z_en_boom.h"
+#include "overlays/actors/ovl_En_Arrow/z_en_arrow.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
 
 #include "soh/OTRGlobals.h"
@@ -404,6 +405,26 @@ static Vec3s sZapperRot;
 static u16 sPhase2Timer;
 static s8 sPhase4HP;
 
+// HiveShock: set by HiveShock.cpp only while it spawns the body. That Barinade skips the intro and the door, never
+// touches the room-cleared flag, the heart container or the blue warp (whose positions belong to Jabu-Jabu's arena),
+// and removes itself when its death scene ends.
+int gHiveShockBossSpawn = 0;
+static u8 sHiveShock = 0;
+
+// In HiveShock the slingshot stuns Barinade the way the boomerang does (the real fight needs the boomerang; a random
+// scene may not even have it). Damage-type bits: boomerang 0x10, slingshot 0x04.
+#define BOSSVA_STUN_FLAGS (sHiveShock ? 0x14 : 0x10)
+
+static s32 BossVa_IsStunItem(Actor* actor) {
+    if (actor->id == ACTOR_EN_BOOM) {
+        return true;
+    }
+    return sHiveShock && actor->id == ACTOR_EN_ARROW && actor->params == ARROW_SEED;
+}
+
+// The damage table the HiveShock body uses: the same as the real one, with the slingshot stunning like the boomerang.
+static DamageTable sHiveDamageTable;
+
 #define BOSS_VA_SHIP_SAVESTATE_FIELDS(F) \
     F(sKillBari)                         \
     F(sBodyBari)                         \
@@ -650,8 +671,13 @@ void BossVa_Init(Actor* thisx, PlayState* play2) {
 
     switch (this->actor.params) {
         case BOSSVA_BODY:
-            Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, ACTOR_BOSS_VA, 0.0f, 80.0f, 400.0f, 0, 0, 0,
-                               BOSSVA_DOOR);
+            sHiveShock = gHiveShockBossSpawn != 0;
+            if (sHiveShock) {
+                BossVa_Reset();
+            } else {
+                Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, ACTOR_BOSS_VA, 0.0f, 80.0f, 400.0f, 0, 0, 0,
+                                   BOSSVA_DOOR);
+            }
             if (Flags_GetClear(play, play->roomCtx.curRoom.num)) {
                 warpId = ACTOR_EN_RU1;
                 if (Flags_GetEventChkInf(EVENTCHKINF_USED_JABU_JABUS_BELLY_BLUE_WARP)) {
@@ -670,44 +696,50 @@ void BossVa_Init(Actor* thisx, PlayState* play2) {
                 sDoorState = 100;
                 Actor_Kill(&this->actor);
             } else {
-                this->actor.colChkInfo.damageTable = sDamageTable;
+                if (sHiveShock) {
+                    sHiveDamageTable = sDamageTable[0];
+                    sHiveDamageTable.table[2] = DMG_ENTRY(0, 0x1); // slingshot, as the boomerang
+                    this->actor.colChkInfo.damageTable = &sHiveDamageTable;
+                } else {
+                    this->actor.colChkInfo.damageTable = sDamageTable;
+                }
                 sPhase2Timer = 0xFFFF;
-                if (Flags_GetEventChkInf(EVENTCHKINF_BEGAN_BARINA_BATTLE)) {
-                    if (Randomizer_GetSettingValue(RSK_SHUFFLE_BOSS_SOULS) &&
-                        !Flags_GetRandomizerInf(RAND_INF_BARINADE_SOUL)) {
-                        sCsState = BOSSVA_BATTLE;
-                    } else {
-                        sCsState = INTRO_CALL_BARI;
-                        sDoorState = 100;
-                        Player_SetCsActionWithHaltedActors(play, &this->actor, 1);
-                        play->envCtx.screenFillColor[0] = 0xDC;
-                        play->envCtx.screenFillColor[1] = 0xDC;
-                        play->envCtx.screenFillColor[2] = 0xBE;
-                        play->envCtx.screenFillColor[3] = 0xD2;
-                        func_80064520(play, &play->csCtx);
-                        sSubCamId = Play_CreateSubCamera(play);
-                        Play_ChangeCameraStatus(play, CAM_ID_MAIN, CAM_STAT_WAIT);
-                        Play_ChangeCameraStatus(play, sSubCamId, CAM_STAT_ACTIVE);
-                        sSubCamEyeNext.x = sSubCamEye.x = 140.0f;
-                        sSubCamEyeNext.y = sSubCamEye.y = 205.0f;
-                        sSubCamEyeNext.z = sSubCamEye.z = -20.0f;
-                        sSubCamAtNext.x = sSubCamAt.x = 10.0f;
-                        sSubCamAtNext.y = sSubCamAt.y = 50.0f;
-                        sSubCamAtNext.z = sSubCamAt.z = -220.0f;
-                        Play_CameraSetAtEye(play, sSubCamId, &sSubCamAt, &sSubCamEye);
-                        this->timer = 20;
+                if (sHiveShock) {
+                    // Straight into the fight, the same state the rando "no soul" fight starts in.
+                    sCsState = BOSSVA_BATTLE;
+                    sDoorState = 100;
+                } else if (GameInteractor_Should(VB_BARINADE_PLAY_REMATCH_INTRO,
+                                                 Flags_GetEventChkInf(EVENTCHKINF_BEGAN_BARINA_BATTLE), this)) {
+                    sCsState = INTRO_CALL_BARI;
+                    sDoorState = 100;
+                    Player_SetCsActionWithHaltedActors(play, &this->actor, 1);
+                    play->envCtx.screenFillColor[0] = 0xDC;
+                    play->envCtx.screenFillColor[1] = 0xDC;
+                    play->envCtx.screenFillColor[2] = 0xBE;
+                    play->envCtx.screenFillColor[3] = 0xD2;
+                    func_80064520(play, &play->csCtx);
+                    sSubCamId = Play_CreateSubCamera(play);
+                    Play_ChangeCameraStatus(play, CAM_ID_MAIN, CAM_STAT_WAIT);
+                    Play_ChangeCameraStatus(play, sSubCamId, CAM_STAT_ACTIVE);
+                    sSubCamEyeNext.x = sSubCamEye.x = 140.0f;
+                    sSubCamEyeNext.y = sSubCamEye.y = 205.0f;
+                    sSubCamEyeNext.z = sSubCamEye.z = -20.0f;
+                    sSubCamAtNext.x = sSubCamAt.x = 10.0f;
+                    sSubCamAtNext.y = sSubCamAt.y = 50.0f;
+                    sSubCamAtNext.z = sSubCamAt.z = -220.0f;
+                    Play_CameraSetAtEye(play, sSubCamId, &sSubCamAt, &sSubCamEye);
+                    this->timer = 20;
 
-                        for (i = BOSSVA_BARI_LOWER_5; i >= BOSSVA_BARI_UPPER_1; i--) {
-                            Actor_SpawnAsChild(
-                                &play->actorCtx, &this->actor, play, ACTOR_BOSS_VA,
-                                sInitPosOffsets[i].x + this->actor.world.pos.x,
-                                sInitPosOffsets[i].y + this->actor.world.pos.y,
-                                sInitPosOffsets[i].z + this->actor.world.pos.z, sInitRot[i].x + this->actor.world.rot.x,
-                                sInitRot[i].y + this->actor.world.rot.y, sInitRot[i].z + this->actor.world.rot.z, i);
-                        }
-
-                        sSubCamAtMaxVelFrac = sSubCamEyeMaxVelFrac = sZeroVec;
+                    for (i = BOSSVA_BARI_LOWER_5; i >= BOSSVA_BARI_UPPER_1; i--) {
+                        Actor_SpawnAsChild(
+                            &play->actorCtx, &this->actor, play, ACTOR_BOSS_VA,
+                            sInitPosOffsets[i].x + this->actor.world.pos.x,
+                            sInitPosOffsets[i].y + this->actor.world.pos.y,
+                            sInitPosOffsets[i].z + this->actor.world.pos.z, sInitRot[i].x + this->actor.world.rot.x,
+                            sInitRot[i].y + this->actor.world.rot.y, sInitRot[i].z + this->actor.world.rot.z, i);
                     }
+
+                    sSubCamAtMaxVelFrac = sSubCamEyeMaxVelFrac = sZeroVec;
 
                 } else {
                     sCsState = INTRO_START;
@@ -717,6 +749,7 @@ void BossVa_Init(Actor* thisx, PlayState* play2) {
                 this->zapHeadPos.x = 1.0f;
                 Collider_InitCylinder(play, &this->colliderBody);
                 Collider_SetCylinder(play, &this->colliderBody, &this->actor, &sCylinderInit);
+                this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
 
                 for (i = BOSSVA_ZAPPER_3; i >= BOSSVA_SUPPORT_1; i--) {
                     Actor_SpawnAsChild(
@@ -786,6 +819,9 @@ void BossVa_Init(Actor* thisx, PlayState* play2) {
 void BossVa_Destroy(Actor* thisx, PlayState* play) {
     BossVa* this = (BossVa*)thisx;
 
+    if (this->actor.params == BOSSVA_BODY) {
+        sHiveShock = 0;
+    }
     SkelAnime_Free(&this->skelAnime, play);
     Collider_DestroyJntSph(play, &this->colliderSph);
     Collider_DestroyCylinder(play, &this->colliderBody);
@@ -1169,14 +1205,14 @@ void BossVa_BodyPhase2(BossVa* this, PlayState* play) {
             Actor_SetColorFilter(&this->actor, 0, 255, 0, 160);
             this->actor.colorFilterTimer = this->invincibilityTimer;
         } else {
-            this->colliderBody.info.bumper.dmgFlags = 0x10;
+            this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
         }
     }
 
     if (this->colliderBody.base.acFlags & AC_HIT) {
         this->colliderBody.base.acFlags &= ~AC_HIT;
 
-        if (this->colliderBody.base.ac->id == ACTOR_EN_BOOM) {
+        if (BossVa_IsStunItem(this->colliderBody.base.ac)) {
             sPhase2Timer &= 0xFE00;
             Actor_SetColorFilter(&this->actor, 0, 255, 0, 160);
             this->colliderBody.info.bumper.dmgFlags = 0xFC00712;
@@ -1257,7 +1293,7 @@ void BossVa_BodyPhase2(BossVa* this, PlayState* play) {
 }
 
 void BossVa_SetupBodyPhase3(BossVa* this) {
-    this->colliderBody.info.bumper.dmgFlags = 0x10;
+    this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
     this->actor.speedXZ = 0.0f;
     sPhase3StopMoving = false;
     BossVa_SetupAction(this, BossVa_BodyPhase3);
@@ -1462,7 +1498,7 @@ void BossVa_BodyPhase4(BossVa* this, PlayState* play) {
             }
             Math_SmoothStepToF(&this->actor.speedXZ, ((sFightPhase - PHASE_4 + 1) * 1.5f) + 4.0f, 1.0f, 0.25f, 0.0f);
         }
-        this->colliderBody.info.bumper.dmgFlags = 0x10;
+        this->colliderBody.info.bumper.dmgFlags = BOSSVA_STUN_FLAGS;
     } else {
         Math_SmoothStepToS(&this->vaBodySpinRate, 0, 1, 0x96, 0);
         if (this->timer > 0) {
@@ -1553,12 +1589,16 @@ void BossVa_BodyPhase4(BossVa* this, PlayState* play) {
 void BossVa_SetupBodyDeath(BossVa* this, PlayState* play) {
     func_800F436C(&this->actor.projectedPos, NA_SE_EN_BALINADE_LEVEL - SFX_FLAG, 1.0f);
     this->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
-    Audio_QueueSeqCmd(0x1 << 28 | SEQ_PLAYER_BGM_MAIN << 24 | 0x100FF);
+    if (!sHiveShock) {
+        Audio_QueueSeqCmd(0x1 << 28 | SEQ_PLAYER_BGM_MAIN << 24 | 0x100FF);
+    }
     this->vaCamRotMod = 0xC31;
     sCsState = DEATH_START;
     this->actor.speedXZ = 0.0f;
     this->unk_1A8 = 0.0f;
-    Flags_SetClear(play, play->roomCtx.curRoom.num);
+    if (!sHiveShock) {
+        Flags_SetClear(play, play->roomCtx.curRoom.num);
+    }
     BossVa_SetupAction(this, BossVa_BodyDeath);
 }
 
@@ -1638,7 +1678,7 @@ void BossVa_BodyDeath(BossVa* this, PlayState* play) {
             }
             break;
         case DEATH_CORE_BURST:
-            if (this->timer == 13) {
+            if (this->timer == 13 && !sHiveShock) {
                 Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | NA_BGM_BOSS_CLEAR);
             }
 
@@ -1679,6 +1719,24 @@ void BossVa_BodyDeath(BossVa* this, PlayState* play) {
 
                 Player_SetCsActionWithHaltedActors(play, &this->actor, 7);
                 sCsState++;
+
+                if (sHiveShock) {
+                    // No heart container and no blue warp (both are placed for Jabu-Jabu's arena): clear the death
+                    // lighting, leave a few recovery hearts and remove the body, the last part standing.
+                    play->envCtx.adjFogColor[0] = play->envCtx.adjFogColor[1] = play->envCtx.adjFogColor[2] = 0;
+                    play->envCtx.adjFogNear = play->envCtx.adjFogFar = 0;
+                    play->envCtx.adjAmbientColor[0] = play->envCtx.adjAmbientColor[1] =
+                        play->envCtx.adjAmbientColor[2] = 0;
+                    play->envCtx.adjLight1Color[0] = play->envCtx.adjLight1Color[1] = play->envCtx.adjLight1Color[2] =
+                        0;
+                    play->envCtx.screenFillColor[3] = 0;
+                    play->envCtx.fillScreen = false;
+                    for (i = 0; i < 3; i++) {
+                        Item_DropCollectible(play, &this->actor.world.pos, ITEM00_HEART);
+                    }
+                    Actor_Kill(&this->actor);
+                    break;
+                }
 
                 if (GameInteractor_Should(VB_SPAWN_HEART_CONTAINER, true)) {
                     Actor_Spawn(&play->actorCtx, play, ACTOR_ITEM_B_HEART, this->actor.world.pos.x,

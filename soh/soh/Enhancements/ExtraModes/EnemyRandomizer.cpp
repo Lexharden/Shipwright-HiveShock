@@ -13,6 +13,7 @@
 #include "soh/SohGui/MenuTypes.h"
 #include "soh/SohGui/SohMenu.h"
 #include "soh/ShipInit.hpp"
+#include "z64scene.h"
 
 extern "C" {
 #include <z64.h>
@@ -73,7 +74,7 @@ static EnemyEntry randomizedEnemySpawnTable[] = {
     { CVAR_ENHANCEMENT("RandomizedEnemyList.FlyingPeahat"),     "Flying Peahat",         ACTOR_EN_PEEHAT,                            -1 }, // Flying Peahat (big grounded, doesn't spawn larva)
     { CVAR_ENHANCEMENT("RandomizedEnemyList.FlyingPot"),        "Flying Pot",            ACTOR_EN_TUBO_TRAP,                          0 }, // Flying pot
     { CVAR_ENHANCEMENT("RandomizedEnemyList.Freezard"),         "Freezard",              ACTOR_EN_FZ,                                 0 }, // Freezard
-    { CVAR_ENHANCEMENT("RandomizedEnemyList.GerudoFighter"),    "Gerudo Fighter",        ACTOR_EN_GELDB,                              0 }, // Gerudo Fighter
+    { CVAR_ENHANCEMENT("RandomizedEnemyList.GerudoFighter"),    "Gerudo Thief",          ACTOR_EN_GELDB,                              0 }, // Gerudo Thief
     { CVAR_ENHANCEMENT("RandomizedEnemyList.Gibdo"),            "Gibdo",                 ACTOR_EN_RD,                             32766 }, // Gibdo (standing)
     { CVAR_ENHANCEMENT("RandomizedEnemyList.GohmaLarva"),       "Gohma Larva",           ACTOR_EN_GOMA,                               7 }, // Gohma Larva (Non-Gohma rooms)
     { CVAR_ENHANCEMENT("RandomizedEnemyList.Guay"),             "Guay",                  ACTOR_EN_CROW,                               0 }, // Guay
@@ -329,6 +330,11 @@ static bool IsEnemyAllowedToSpawn(s16 sceneNum, s8 roomNum, EnemyEntry enemy, s1
         return false;
     }
 
+    // Don't allow Lizalfos in the silver rupee bridge room of spirit, as they spawn in the room above
+    if (sceneNum == SCENE_SPIRIT_TEMPLE && roomNum == 2 && enemy.id == ACTOR_EN_ZF && enemy.params == -1) {
+        return false;
+    }
+
     // Don't allow big Stalchildren, big Peahats and Baris (big jellyfish) during the Gohma fight because they can clip
     // into Gohma and it crashes the game. Likely because Gohma on the ceiling can't handle collision with other
     // enemies.
@@ -557,6 +563,11 @@ static u8 GetRandomizedEnemy(PlayState* play, s16* actorId, s16* posX, s16* posY
             // when not twisted, the whole floor is at 1228
 
             *posY = 1228;
+        } else if (isMQ && play->sceneNum == SCENE_SPIRIT_TEMPLE && play->roomCtx.curRoom.num == 27) {
+            // Similar to the twisted hallway, the turntable here is an actor used as flooring, so the enemy needs
+            // spawning on it
+
+            *posY = 50;
         } else {
             raycastResult = BgCheck_AnyRaycastFloor1(&play->colCtx, &poly, &pos);
 
@@ -828,10 +839,13 @@ void RegisterEnemyRandomizer() {
         s16 posZ = static_cast<s16>(blkobj->dyna.actor.world.pos.z);
         s16 rotX = 0;
         s16 rotY = blkobj->dyna.actor.yawTowardsPlayer;
+        s16 seededRotY = 6969;
         s16 rotZ = 0;
         s16 params = 0;
 
-        if (!GetRandomizedEnemy(play, &actorId, &posX, &posY, &posZ, &rotX, &rotY, &rotZ, &params)) {
+        // rotation is hardcoded here as it is inconsistent, breaking seeded randomiser
+        // value provided is the best meme number avalible, theoretically any number works
+        if (!GetRandomizedEnemy(play, &actorId, &posX, &posY, &posZ, &rotX, &seededRotY, &rotZ, &params)) {
             assert(false);
         }
 

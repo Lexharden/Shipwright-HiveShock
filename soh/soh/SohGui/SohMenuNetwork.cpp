@@ -8,6 +8,7 @@
 #include <soh/Network/Sail/Sail.h>
 #include <soh/Network/CrowdControl/CrowdControl.h>
 #include <soh/Network/HiveShock/HiveShock.h>
+#include <soh/Network/HiveShock/HiveShockUpdater.h>
 #include "soh/SohGui/UIWidgets.hpp"
 
 namespace SohGui {
@@ -223,14 +224,10 @@ void SohMenu::AddMenuNetwork() {
         });
     AddWidget(path, "Enemy Load Limit: %d", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_REMOTE_HIVESHOCK("MaxLoad"))
-        .Options(IntSliderOptions()
-                     .Min(4)
-                     .Max(100)
-                     .DefaultValue(14)
-                     .Format("%d")
-                     .Tooltip("How many enemies spawned through HiveShock can be alive at once. Each enemy uses "
-                              "1 to 4 points (bats and cuccos 1, Dark Link and Iron Knuckles 4). Extra spawns are "
-                              "never discarded: they wait in a queue and enter as enemies are defeated."));
+        .Options(IntSliderOptions().Min(4).Max(100).DefaultValue(14).Format("%d").Tooltip(
+            "How many enemies spawned through HiveShock can be alive at once. Each enemy uses "
+            "1 to 4 points (bats and cuccos 1, Dark Link and Iron Knuckles 4). Extra spawns are "
+            "never discarded: they wait in a queue and enter as enemies are defeated."));
     AddWidget(path, "HiveShock Status", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
         info.isHidden = !HiveShock::Instance->IsEnabled();
         if (HiveShock::Instance->HasClient()) {
@@ -243,17 +240,13 @@ void SohMenu::AddMenuNetwork() {
     });
     AddWidget(path, "Elite Head Start: %d", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_REMOTE_HIVESHOCK("EliteReserve"))
-        .Options(IntSliderOptions()
-                     .Min(0)
-                     .Max(40)
-                     .DefaultValue(10)
-                     .Format("%d")
-                     .Tooltip("Points on top of the Enemy Load Limit that only elite enemies (Iron Knuckle, Dark "
-                              "Link, Stalfos...) can use, so the first ones enter at once without waiting for "
-                              "ordinary enemies to be defeated. It is not a ceiling: elites can also use the ordinary "
-                              "limit, and while an elite waits, the room that frees up as ordinary enemies are "
-                              "defeated is reserved for it (no new ordinary enemy enters) until it fits. 0 turns the "
-                              "head start off."));
+        .Options(IntSliderOptions().Min(0).Max(40).DefaultValue(10).Format("%d").Tooltip(
+            "Points on top of the Enemy Load Limit that only elite enemies (Iron Knuckle, Dark "
+            "Link, Stalfos...) can use, so the first ones enter at once without waiting for "
+            "ordinary enemies to be defeated. It is not a ceiling: elites can also use the ordinary "
+            "limit, and while an elite waits, the room that frees up as ordinary enemies are "
+            "defeated is reserved for it (no new ordinary enemy enters) until it fits. 0 turns the "
+            "head start off."));
     AddWidget(path, "Elite Enemies First", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_REMOTE_HIVESHOCK("ElitePriority"))
         .RaceDisable(false)
@@ -270,23 +263,15 @@ void SohMenu::AddMenuNetwork() {
               WIDGET_TEXT);
     AddWidget(path, "Max HiveShock Enemies Alive: %d", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_REMOTE_HIVESHOCK("MaxAlive"))
-        .Options(IntSliderOptions()
-                     .Min(8)
-                     .Max(80)
-                     .DefaultValue(32)
-                     .Format("%d")
-                     .Tooltip("Most enemies spawned through HiveShock that can be alive at once, whatever their "
-                              "weight. Default 32. Higher values can hurt performance or stability."));
+        .Options(IntSliderOptions().Min(8).Max(80).DefaultValue(32).Format("%d").Tooltip(
+            "Most enemies spawned through HiveShock that can be alive at once, whatever their "
+            "weight. Default 32. Higher values can hurt performance or stability."));
     AddWidget(path, "Max Enemies In The Scene: %d", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_REMOTE_HIVESHOCK("MaxSceneEnemies"))
-        .Options(IntSliderOptions()
-                     .Min(16)
-                     .Max(100)
-                     .DefaultValue(40)
-                     .Format("%d")
-                     .Tooltip("Most enemies allowed in the scene in total, counting the game's own. Default 40. "
-                              "Spawns wait while the scene is at this number. Higher values can hurt performance or "
-                              "stability."));
+        .Options(IntSliderOptions().Min(16).Max(100).DefaultValue(40).Format("%d").Tooltip(
+            "Most enemies allowed in the scene in total, counting the game's own. Default 40. "
+            "Spawns wait while the scene is at this number. Higher values can hurt performance or "
+            "stability."));
     AddWidget(path, "Defeat Alive Enemies When Link Dies", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_REMOTE_HIVESHOCK("DefeatOnDeath"))
         .RaceDisable(false)
@@ -304,13 +289,12 @@ void SohMenu::AddMenuNetwork() {
     AddWidget(path, "Enemy Counter", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
         info.isHidden = !HiveShock::Instance->IsEnabled();
         const HiveShock::Stats stats = HiveShock::Instance->GetStats();
-        info.name = "Spawned " + std::to_string(stats.spawned) + " / " + std::to_string(stats.total) +
-                    "  |  Alive " + std::to_string(stats.alive) + "  |  Waiting " + std::to_string(stats.waiting) +
-                    "  |  Defeated " + std::to_string(stats.defeated);
+        info.name = "Spawned " + std::to_string(stats.spawned) + " / " + std::to_string(stats.total) + "  |  Alive " +
+                    std::to_string(stats.alive) + "  |  Waiting " + std::to_string(stats.waiting) + "  |  Defeated " +
+                    std::to_string(stats.defeated);
         if (stats.eliteBankMax > 0) {
             info.name += "  |  Elite head start " + std::to_string(stats.eliteBank) + "/" +
-                         std::to_string(stats.eliteBankMax) + " (" + std::to_string(stats.eliteWaiting) +
-                         " waiting)";
+                         std::to_string(stats.eliteBankMax) + " (" + std::to_string(stats.eliteWaiting) + " waiting)";
         }
     });
     AddWidget(path, "Reset Counter", WIDGET_BUTTON)
@@ -324,6 +308,73 @@ void SohMenu::AddMenuNetwork() {
         .Options(WindowButtonOptions().Tooltip(
             "Shows a small on-screen counter of the enemies sent through HiveShock: spawned out of the total "
             "received, alive, waiting in the queue and defeated."));
+
+    AddWidget(path, "Updates", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Version", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
+        // The first time this page is drawn in a session it looks for a new release (one request, off the game
+        // thread). After that only the button below asks again.
+        HiveShockUpdater::CheckOnce();
+        const HiveShockUpdater::Snapshot update = HiveShockUpdater::GetSnapshot();
+        info.name = "Version: " + (update.current.empty() ? std::string("development build") : update.current);
+        if (!update.latest.empty()) {
+            info.name += "  |  Latest release: " + update.latest;
+        }
+    });
+    AddWidget(path, "Update Status", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
+        const HiveShockUpdater::Snapshot update = HiveShockUpdater::GetSnapshot();
+        info.name = update.message;
+        if (update.state == HiveShockUpdater::State::Downloading && update.percent > 0) {
+            info.name += " " + std::to_string(update.percent) + "%";
+        }
+        info.isHidden = update.message.empty();
+    });
+    AddWidget(path, "Check For Updates", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip("Asks GitHub whether a newer HiveShock release exists."))
+        .PreFunc([](WidgetInfo& info) {
+            const HiveShockUpdater::State state = HiveShockUpdater::GetSnapshot().state;
+            info.options->disabled =
+                state == HiveShockUpdater::State::Checking || state == HiveShockUpdater::State::Downloading;
+        })
+        .Callback([](WidgetInfo& info) { HiveShockUpdater::CheckNow(); });
+    AddWidget(path, "Download Update", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Downloads the newest release for this system from GitHub. On Windows the files are unpacked and can "
+            "be installed with one more click; on other systems the file is saved in your Downloads folder."))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = HiveShockUpdater::GetSnapshot().state != HiveShockUpdater::State::Available;
+        })
+        .Callback([](WidgetInfo& info) { HiveShockUpdater::Download(); });
+    AddWidget(path, "Install And Restart", WIDGET_BUTTON)
+        .Options(ButtonOptions().Tooltip(
+            "Closes the game, copies the new files over the current ones and opens the game again. Your saves and "
+            "settings are not touched."))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = !HiveShockUpdater::CanInstall() ||
+                            HiveShockUpdater::GetSnapshot().state != HiveShockUpdater::State::Ready;
+        })
+        .Callback([](WidgetInfo& info) { HiveShockUpdater::InstallAndRestart(); });
+    AddWidget(path, "Open Download Folder", WIDGET_BUTTON)
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = HiveShockUpdater::CanInstall() ||
+                            HiveShockUpdater::GetSnapshot().state != HiveShockUpdater::State::Ready;
+        })
+        .Callback([](WidgetInfo& info) {
+            const std::string location = HiveShockUpdater::GetSnapshot().location;
+            if (!location.empty()) {
+                SDL_OpenURL(std::string("file://" + location).c_str());
+            }
+        });
+    AddWidget(path, "Open Release Page", WIDGET_BUTTON)
+        .PreFunc([](WidgetInfo& info) {
+            const HiveShockUpdater::State state = HiveShockUpdater::GetSnapshot().state;
+            info.isHidden = state != HiveShockUpdater::State::Available && state != HiveShockUpdater::State::Ready;
+        })
+        .Callback([](WidgetInfo& info) {
+            const std::string url = HiveShockUpdater::GetSnapshot().releaseUrl;
+            if (!url.empty()) {
+                SDL_OpenURL(url.c_str());
+            }
+        });
 
     path.sidebarName = "Anchor";
     AddSidebarEntry("Network", path.sidebarName, 2);

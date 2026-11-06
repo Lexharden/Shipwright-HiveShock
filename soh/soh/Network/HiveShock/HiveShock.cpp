@@ -29,8 +29,13 @@
 #include "soh/SaveManager.h"
 #include "soh/ShipInit.hpp"
 #include "soh/cvar_prefixes.h"
+#include "overlays/actors/ovl_En_Bb/z_en_bb.h"
+#include "overlays/actors/ovl_En_Am/z_en_am.h"
+#include "overlays/actors/ovl_En_Dh/z_en_dh.h"
+#include "overlays/actors/ovl_En_GeldB/z_en_geldb.h"
 #include "overlays/actors/ovl_En_Elf/z_en_elf.h"
 #include "overlays/actors/ovl_En_Niw/z_en_niw.h"
+#include "overlays/actors/ovl_En_Md/z_en_md.h"
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -63,6 +68,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 #endif
+
+#include "HiveShockBossDeath.h" // gHiveShockBossSpawn and the slot limits of the Ganon bosses
 
 extern "C" {
 #include <z64.h>
@@ -101,8 +108,8 @@ constexpr s32 kDefaultMaxSceneEnemies = 40;
 constexpr s32 kDefaultMaxLoad = 14;
 // Gameplay runs at 20 frames/s. Spawns are released at most one every ~0.4 s so a refill never arrives as a burst.
 constexpr u32 kSpawnGapFrames = 8;
-// Enemies this heavy or heavier are "elite": they go ahead of the ordinary ones in the queue (Iron Knuckle, Garo Master,
-// Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, Floormaster, White Wolfos). Turn off with
+// Enemies this heavy or heavier are "elite": they go ahead of the ordinary ones in the queue (Iron Knuckle, Garo
+// Master, Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, Floormaster, White Wolfos). Turn off with
 // gRemote.HiveShock.ElitePriority.
 constexpr u8 kEliteWeight = 3;
 // Elite head start: points reserved for elite enemies on top of MaxLoad, so the first ones enter at once
@@ -115,6 +122,7 @@ constexpr s32 kOrdinaryFloor = 0;
 constexpr u32 kEliteWaitLogTicks = 100;
 // Retry cadence for a spawn that is held (not allowed here right now) or that failed to place an actor.
 constexpr u32 kHeldRecheckFrames = 10;
+constexpr u32 kHeldLogTicks = 100;
 constexpr u32 kFailedRetryFrames = 20;
 constexpr u32 kCuccoArmyFrameGap = 4;
 // After the room changes, injected enemies that vanish while still alive were dropped by the room swap (not killed),
@@ -179,9 +187,9 @@ struct WarpAlias {
 struct PendingSpawn {
     std::string name;
     std::string user;
-    u32 earliestTick = 0; // compared against gTick
-    u32 attempts = 0;     // failed placements, only used to throttle logging
-    s64 createdAt = 0;    // unix seconds, only used to expire entries restored from disk
+    u32 earliestTick = 0;  // compared against gTick
+    u32 attempts = 0;      // failed placements, only used to throttle logging
+    s64 createdAt = 0;     // unix seconds, only used to expire entries restored from disk
     bool requeued = false; // an enemy that was already counted as spawned and is coming back after a scene change
 };
 
@@ -194,6 +202,14 @@ struct TrackedEnemy {
     bool alive = true;      // false once it was seen dead (health reached 0): a dying enemy is not requeued
     bool sawHealth = false; // some actors (cuccos) never have health, so "health == 0" only means dead if it was > 0
     u32 farSinceTick = 0;   // 0 = close enough to Link
+};
+
+// A Kaepora or a Mido sent by a viewer. They are not enemies: they do not count in the load, the headcount or the
+// counters, are never moved or queued again, and go away by themselves (see UpdatePests).
+struct PestState {
+    Actor* actor = nullptr;
+    const SpawnDef* def = nullptr;
+    u32 expireTick = 0;
 };
 
 std::mutex gQueueMutex;
@@ -240,11 +256,15 @@ BuffState gBuffs[static_cast<size_t>(BridgeBuff::Count)]{};
 // Disable() clears it.
 std::deque<PendingSpawn> gPendingSpawns;
 std::vector<TrackedEnemy> gTrackedEnemies;
+std::vector<PestState> gPests;
+// True while Actor_Spawn runs for a pest: lets the VB_MIDO_SPAWN hook tell HiveShock's Mido from the game's.
+bool gPestSpawning = false;
 // Monotonic game-update counter. Unlike gameplayFrames it does not restart on every scene load, so delays and
 // spacing computed from it stay valid across scene changes.
 u32 gTick = 0;
 u32 gNextSpawnTick = 0;
 u32 gLastEliteWaitLogTick = 0;
+u32 gLastHeldLogTick = 0;
 u32 gRoomGraceUntilTick = 0;
 s16 gLastRoom = -1;
 bool gBacklogDirty = false;
@@ -268,25 +288,61 @@ constexpr SpawnDef kSpawnTable[] = {
     { "white_wolfos", ACTOR_EN_WF, (0xFF << 8) | 1, false, 3 },
     { "stalchild", ACTOR_EN_SKB, 0, false, 1 },
     { "stalfos", ACTOR_EN_TEST, 2, false, 3 },
-    { "bubble", ACTOR_EN_BB, 0, false, 1 },
+    // params 0 is ENBB_FLAME_TRAIL (a trail segment with no targetActor, crashes in EnBb_FlameTrail); -1 is ENBB_BLUE.
+    { "bubble", ACTOR_EN_BB, ENBB_BLUE, false, 1 },
     { "skulltula", ACTOR_EN_ST, 0, false, 1 },
     { "bat", ACTOR_EN_FIREFLY, 2, false, 1 },
     { "tektite", ACTOR_EN_TITE, 0, false, 1 },
     { "blue_tektite", ACTOR_EN_TITE, -1, false, 2 },
     { "freezard", ACTOR_EN_FZ, 0, false, 1 },
     { "cucco", ACTOR_EN_NIW, 0, true, 1 },
+    // An ordinary cucco: same actor, but left alone (see SpawnDefNow). It wanders, can be picked up and only gets
+    // angry if Link hits it. Not an enemy.
+    { "cucco_calm", ACTOR_EN_NIW, 0, true, 0 },
     { "dinolfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFE, false, 3 },
     { "lizalfos", ACTOR_EN_ZF, (0xFF << 8) | 0xFF, false, 3 },
     { "iron_knuckle", ACTOR_EN_IK, 2, false, 4 },
-    { "garo", ACTOR_EN_TEST, 2, false, 3 },
-    { "garo_master", ACTOR_EN_IK, 2, false, 4 },
     { "wallmaster", ACTOR_EN_WALLMAS, 0, false, 2 },
     { "floormaster", ACTOR_EN_FLOORMAS, 0, false, 3 },
-    { "eyegore", ACTOR_EN_IK, 2, false, 4 },
     { "dark_link", ACTOR_EN_TORCH2, 0, false, 4 },
     { "arwing", ACTOR_EN_CLEAR_TAG, 1, false, 2 },
+    // Mini-bosses and dungeon enemies. Same params the enemy randomizer already spawns outside their rooms.
+    // Dead Hand: its params are ignored by Init; it is woken up after spawning (see SpawnDefNow).
+    { "dead_hand", ACTOR_EN_DH, 0, false, 4 },
+    // Nabooru's Iron Knuckle: switch flag 0xFF marks it as HiveShock's (see EnIk_Init), so no story flag is touched.
+    { "nabooru", ACTOR_EN_IK, (0xFF << 8), false, 5 },
+    { "dodongo", ACTOR_EN_DODONGO, -1, false, 3 },
+    { "baby_dodongo", ACTOR_EN_DODOJR, 0, false, 1 },
+    { "biri", ACTOR_EN_BILI, 0, false, 1 },
+    { "anubis", ACTOR_EN_ANUBICE_TAG, 1, false, 3 },
+    { "flying_pot", ACTOR_EN_TUBO_TRAP, 0, false, 1 },
+    // The real Ganondorf and Ganon (beast) of the final fights, started straight in the fight with no cutscene and
+    // around the spot they spawn at; when beaten they explode (see the gHiveShockBossSpawn notes in z_boss_ganon.c
+    // and z_boss_ganon2.c). Separate spawns: the beast is not a transformation of Ganondorf.
+    { "ganondorf", ACTOR_BOSS_GANON, 0, false, 6 },
+    { "ganon_beast", ACTOR_BOSS_GANON2, 0, false, 8 },
+    // Barinade: params -1 is the body, which builds the rest (see the gHiveShockBossSpawn notes in z_boss_va.c).
+    { "barinade", ACTOR_BOSS_VA, -1, false, 8 },
+    // Birova (Twinrova): the second phase of the fight, started straight away around Link wherever he is (see the
+    // gHiveShockBossSpawn notes in z_boss_tw.c). Params 2 is Twinrova herself; she brings her sisters, hidden.
+    { "birova", ACTOR_BOSS_TW, 2, false, 8 },
+    // Gerudo Fighter with no key flag: see the VB hooks in RegisterHiveShock. Armos -1 is the enemy variant and is
+    // woken after spawning. Peahat -1 is the big grounded one (it rises when Link is close and sheds larvae).
+    { "gerudo_fighter", ACTOR_EN_GELDB, 0, false, 3 },
+    { "flare_dancer", ACTOR_EN_FD, 0, false, 4 },
+    { "armos", ACTOR_EN_AM, -1, false, 2 },
+    { "peahat", ACTOR_EN_PEEHAT, -1, false, 3 },
+    // Params 7 is the non-Gohma egg: it hatches by itself when Link is within 100 units, so it spawns close.
+    { "gohma_larva", ACTOR_EN_GOMA, 7, false, 1 },
     // ACTOR_EN_ELF is Navi with params 0; FAIRY_HEAL is the healing fairy (touching it restores 8 hearts).
     { "fairy", ACTOR_EN_ELF, FAIRY_HEAL, true, 0 },
+    // Navi (params 0 = FAIRY_NAVI): follows Link around and carries the name tag of whoever sent her. Not an enemy.
+    { "navi", ACTOR_EN_ELF, FAIRY_NAVI, true, 0 },
+    // Kaepora Gaebora: params 0xBF is the Hyrule Castle owl (the longest talk, no save flag; switch flag 0x3F is never
+    // read or written). He talks to Link by himself and the cursor starts on "repeat". Not an enemy (see PestState).
+    { "owl", ACTOR_EN_OWL, 0xBF, false, 0 },
+    // Mido as a wall in front of Link: params 0xFF00 means "no path". Not an enemy (see PestState).
+    { "mido", ACTOR_EN_MD, static_cast<s16>(0xFF00), false, 0 },
     { "bombchu", ACTOR_EN_BOM_CHU, 0, true, 0 },
 };
 
@@ -330,6 +386,7 @@ constexpr s32 kRandomWarps[] = {
 };
 
 const SpawnDef* FindSpawnDef(const std::string& name);
+void KillTrackedActor(Actor* actor);
 
 float GetNumber(const json& cmd, float defaultValue) {
     if (cmd.contains("strength") && cmd["strength"].is_number()) {
@@ -810,6 +867,19 @@ std::string NormalizeActionName(std::string name) {
     if (out == "bluetektite") {
         return "blue_tektite";
     }
+    if (out == "twinrova") {
+        return "birova";
+    }
+    // "búho": the accent is dropped above, so it arrives as "bho".
+    if (out == "cucco_normal" || out == "normal_cucco" || out == "calm_cucco" || out == "cuccocalm") {
+        return "cucco_calm";
+    }
+    if (out == "kaepora" || out == "buho" || out == "bho" || out == "kaepora_gaebora") {
+        return "owl";
+    }
+    if (out == "midoblock" || out == "mido_block") {
+        return "mido";
+    }
     if (out == "randomenemy" || out == "random") {
         return "random_enemy";
     }
@@ -832,8 +902,16 @@ const SpawnDef* FindSpawnDef(const std::string& name) {
     return nullptr;
 }
 
+bool IsPestName(const std::string& name) {
+    return name == "owl" || name == "mido";
+}
+
+bool IsCalmCucco(const SpawnDef& def) {
+    return def.actorId == ACTOR_EN_NIW && std::string(def.name) == "cucco_calm";
+}
+
 bool IsTrackedSpawnName(const std::string& name) {
-    return name != "fairy" && name != "bombchu";
+    return name != "fairy" && name != "navi" && name != "bombchu" && name != "cucco_calm" && !IsPestName(name);
 }
 
 bool ActorStillLoaded(Actor* actor) {
@@ -851,11 +929,21 @@ bool ActorStillLoaded(Actor* actor) {
     return false;
 }
 
+bool TrackedStillLoaded(const TrackedEnemy& t);
+
+// Enemies in the scene, the game's own included. The bosses HiveShock injected live in the boss list, so they are added
+// on top: they take the same room as any other enemy.
 s32 CountSceneEnemies() {
     if (gPlayState == nullptr) {
         return 0;
     }
-    return gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].length;
+    s32 count = gPlayState->actorCtx.actorLists[ACTORCAT_ENEMY].length;
+    for (const TrackedEnemy& t : gTrackedEnemies) {
+        if (t.actor != nullptr && t.actor->category == ACTORCAT_BOSS && TrackedStillLoaded(t)) {
+            count++;
+        }
+    }
+    return count;
 }
 
 s64 UnixNow() {
@@ -886,6 +974,14 @@ void RequeueSurvivors(const std::vector<TrackedEnemy>& survivors) {
     if (!survivors.empty()) {
         SPDLOG_INFO("[HiveShock] {} enemies survived a scene/room change, queued again", survivors.size());
     }
+}
+
+// The bosses taken from the vanilla game. Their parts are separate actors that must keep their update order, so they
+// are never moved in the actor list or relocated. Ganondorf and Ganon keep their file-level state in a slot each, so
+// several of them can exist at once; Barinade has no slots yet and stays one at a time.
+bool IsHiveBoss(s16 actorId) {
+    return actorId == ACTOR_BOSS_VA || actorId == ACTOR_BOSS_GANON || actorId == ACTOR_BOSS_GANON2 ||
+           actorId == ACTOR_BOSS_TW;
 }
 
 bool TrackedStillLoaded(const TrackedEnemy& t) {
@@ -998,12 +1094,57 @@ void TrackBridgeEnemy(Actor* actor, const SpawnDef& def, const std::string& user
     gTrackedEnemies.push_back(std::move(tracked));
 }
 
+// How long a pest stays, in game ticks (20 per second). Mido is a fixed 30 s; Kaepora leaves by himself after the talk,
+// so his limit only covers the case where the talk never starts (Link swimming, in the air or targeting something).
+constexpr u32 kMidoStayTicks = 30 * 20;
+constexpr u32 kOwlStayTicks = 90 * 20;
+
+void TrackPest(Actor* actor, const SpawnDef& def) {
+    if (actor == nullptr) {
+        return;
+    }
+    PestState pest;
+    pest.actor = actor;
+    pest.def = &def;
+    pest.expireTick = gTick + (def.actorId == ACTOR_EN_MD ? kMidoStayTicks : kOwlStayTicks);
+    gPests.push_back(pest);
+}
+
+// Whether Link is in the middle of a talk or of a cutscene action started by one (Kaepora's farewell). Killing the
+// other party then would leave Link stuck in it.
+bool LinkIsTalking() {
+    if (gPlayState == nullptr) {
+        return false;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    return gPlayState->msgCtx.msgMode != 0 ||
+           (player != nullptr && (player->stateFlags1 & (PLAYER_STATE1_TALKING | PLAYER_STATE1_IN_CUTSCENE)) != 0);
+}
+
+// Per-frame upkeep of the pests: forget the ones that are gone and send away the ones whose time is up, never in the
+// middle of a talk.
+void UpdatePests() {
+    for (auto it = gPests.begin(); it != gPests.end();) {
+        if (it->def == nullptr || !ActorStillLoaded(it->actor) || it->actor->id != it->def->actorId) {
+            it = gPests.erase(it);
+            continue;
+        }
+        if (gTick >= it->expireTick && !LinkIsTalking()) {
+            KillTrackedActor(it->actor);
+            it = gPests.erase(it);
+            continue;
+        }
+        ++it;
+    }
+}
+
 // Explicit streamer action: kills the live injected enemies. Spawns still waiting in the backlog are untouched.
 void ClearBridgeEnemies() {
     for (TrackedEnemy& t : gTrackedEnemies) {
         if (TrackedStillLoaded(t)) {
-            Actor_Kill(t.actor);
+            KillTrackedActor(t.actor);
         }
+        gStatDefeated++;
     }
     gTrackedEnemies.clear();
     SPDLOG_INFO("[HiveShock] cleared bridge enemies");
@@ -1016,7 +1157,7 @@ void DefeatAliveEnemies(const char* reason) {
     int defeated = 0;
     for (TrackedEnemy& t : gTrackedEnemies) {
         if (TrackedStillLoaded(t)) {
-            Actor_Kill(t.actor);
+            KillTrackedActor(t.actor);
         }
         gStatDefeated++;
         defeated++;
@@ -1038,6 +1179,7 @@ void ClearPendingSpawns() {
 // so it reappears next to Link, and the tracking starts clean. Does not touch the old actor pointers. With
 // "Enemies disappear on zone change" they are not queued again: they are left behind and counted as defeated.
 void ResetBridgeActorTracking() {
+    gPests.clear(); // passing effects: they are left behind with the scene, never queued again
     if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("DespawnOnZoneChange"), 0)) {
         if (!gTrackedEnemies.empty()) {
             gStatDefeated += static_cast<int>(gTrackedEnemies.size());
@@ -1078,6 +1220,100 @@ bool EnqueueEnemySpawn(std::string name, std::string user, u32 delayTicks) {
     return true;
 }
 
+// Whether Barinade (any part of him) is in the scene.
+bool IsBarinadeInScene() {
+    for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
+        if (it->id == ACTOR_BOSS_VA) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether Twinrova (or her sisters, or a blast of hers) is in the scene.
+bool IsTwinrovaInScene() {
+    for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
+        if (it->id == ACTOR_BOSS_TW) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether a Ganondorf or a beast is in the scene. Only the bodies count: the energy balls and lightning Ganondorf
+// throws are BOSS_GANON actors too, and must not make the scene look occupied.
+bool IsGanonInScene() {
+    for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
+        if (it->id == ACTOR_BOSS_GANON2 || (it->id == ACTOR_BOSS_GANON && it->params < 0x64)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// How many live injected enemies of this kind there are.
+s32 CountTrackedOfKind(s16 actorId) {
+    s32 count = 0;
+    for (const TrackedEnemy& t : gTrackedEnemies) {
+        if (t.def != nullptr && t.def->actorId == actorId) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// True when `root` is somewhere up the parent chain of `actor`. The walk is bounded in case of a bad link.
+bool IsDescendantOf(const Actor* actor, const Actor* root) {
+    const Actor* it = actor->parent;
+    for (int depth = 0; it != nullptr && depth < 8; depth++, it = it->parent) {
+        if (it == root) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Kills one actor. A grabber (a Dead Hand's hand, for one) keeps Link held through player->actor.parent and only lets
+// go from its own update, which never runs again once it is killed: Link would stay stuck to an actor that is gone.
+// So he is released first, the same way the hand does it.
+void KillActorReleasingLink(Actor* victim) {
+    Player* player = GET_PLAYER(gPlayState);
+    if (player != nullptr && player->actor.parent == victim) {
+        player->stateFlags2 &= ~PLAYER_STATE2_GRABBED_BY_ENEMY;
+        player->actor.parent = nullptr;
+        player->av2.actionVar2 = 200;
+    }
+    Actor_Kill(victim);
+}
+
+// Removes an injected enemy. Barinade is made of many actors that point at the body: killing only the body would
+// leave the others running with a dangling parent, so a Barinade is always removed whole. The same goes for anything
+// that has the enemy as its parent: Ganondorf's cape and energy balls, a Dead Hand's hands. They are separate actors
+// that draw themselves and would stay on screen until the body's Destroy ran (which waits while Link is dead or the
+// actors are frozen), so the whole tree goes at once.
+void KillTrackedActor(Actor* actor) {
+    if (actor->id == ACTOR_BOSS_VA || actor->id == ACTOR_BOSS_TW) {
+        // Twinrova's sisters point at each other, not at her, so her tree cannot be found by parent either.
+        for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_BOSS].head; it != nullptr; it = it->next) {
+            if (it->id == actor->id) {
+                KillActorReleasingLink(it);
+            }
+        }
+        return;
+    }
+    for (int category = 0; category < ACTORCAT_MAX; category++) {
+        if (category == ACTORCAT_PLAYER) {
+            continue; // Link has whatever grabbed him as his parent; he is not part of its tree
+        }
+        for (Actor* it = gPlayState->actorCtx.actorLists[category].head; it != nullptr; it = it->next) {
+            if (it != actor && IsDescendantOf(it, actor)) {
+                KillActorReleasingLink(it);
+            }
+        }
+    }
+    KillActorReleasingLink(actor);
+}
+
 Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY, s16 rotZ, s32 params) {
     // Actor_Spawn refuses enemies in a cleared room, so drop the flag for the duration of the call. The bit is
     // toggled directly (not via Flags_Set/UnsetClear) so no scene-flag hooks fire: the randomizer tracker and
@@ -1090,7 +1326,11 @@ Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY,
         gPlayState->actorCtx.flags.clear &= ~roomBit;
     }
 
+    gHiveShockBossSpawn = IsHiveBoss(actorId);
+    gPestSpawning = actorId == ACTOR_EN_MD;
     Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState, actorId, x, y, z, rotX, rotY, rotZ, params);
+    gPestSpawning = false;
+    gHiveShockBossSpawn = 0;
 
     if (wasCleared) {
         gPlayState->actorCtx.flags.clear |= roomBit;
@@ -1098,21 +1338,97 @@ Actor* SpawnActorInAnyRoom(s16 actorId, f32 x, f32 y, f32 z, s16 rotX, s16 rotY,
     return spawned;
 }
 
-bool CanSpawnInCurrentScene(const SpawnDef& def) {
+// Why this spawn cannot happen where Link is, or nullptr if it can. The reason goes to the log: a held spawn is
+// otherwise silent.
+// Whether a pest of this kind (a Kaepora or a Mido) is still around.
+bool IsPestInScene(s16 actorId) {
+    for (const PestState& pest : gPests) {
+        if (pest.def != nullptr && pest.def->actorId == actorId && ActorStillLoaded(pest.actor) &&
+            pest.actor->id == actorId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const char* SceneBlockReason(const SpawnDef& def) {
     int16_t sceneNum = gPlayState->sceneNum;
     int16_t roomNum = gPlayState->roomCtx.curRoom.num;
 
+    // Only one Kaepora at a time (his talks would overlap); any number of Midos.
+    if (def.actorId == ACTOR_EN_OWL && IsPestInScene(def.actorId)) {
+        return "Kaepora is already in the scene";
+    }
+    if (IsCalmCucco(def)) {
+        // Calm cuccos stay until the scene changes, so they are capped instead of piling up.
+        constexpr s32 kMaxCalmCuccos = 15;
+        s32 cuccos = 0;
+        for (Actor* it = gPlayState->actorCtx.actorLists[ACTORCAT_PROP].head; it != nullptr; it = it->next) {
+            cuccos += it->id == ACTOR_EN_NIW ? 1 : 0;
+        }
+        if (cuccos >= kMaxCalmCuccos) {
+            return "too many cuccos in the scene";
+        }
+    }
+
     if (sceneNum == SCENE_FOREST_TEMPLE && (roomNum == 12 || roomNum == 13 || roomNum == 16)) {
-        return false;
+        return "this Forest Temple room does not take extra enemies";
+    }
+    if (def.actorId == ACTOR_BOSS_VA) {
+        // Not in Jabu-Jabu's boss room (the real Barinade shares its state), and one at a time: his many parts keep
+        // their state in file-level variables. He does not share the stage with Ganondorf or Ganon either (their
+        // effect pools and cameras are not meant to run together with his).
+        if (sceneNum == SCENE_JABU_JABU_BOSS) {
+            return "the real Barinade fight lives in this scene";
+        }
+        if (IsBarinadeInScene()) {
+            return "Barinade is already in the scene";
+        }
+        if (IsGanonInScene()) {
+            return "Ganondorf or Ganon is in the scene";
+        }
+        if (IsTwinrovaInScene()) {
+            return "Birova is in the scene";
+        }
+    }
+    if (def.actorId == ACTOR_BOSS_TW) {
+        // One at a time, and not together with the other bosses: her blasts, her effect pool and her light flashes
+        // are shared state, like Barinade's.
+        if (sceneNum == SCENE_SPIRIT_TEMPLE_BOSS) {
+            return "the real Birova fight lives in this scene";
+        }
+        if (IsTwinrovaInScene()) {
+            return "Birova is already in the scene";
+        }
+        if (IsBarinadeInScene() || IsGanonInScene()) {
+            return "another boss is in the scene";
+        }
+    }
+    if (def.actorId == ACTOR_BOSS_GANON || def.actorId == ACTOR_BOSS_GANON2) {
+        // Not where the real fight lives (it shares the state). Any number of them can share the scene, up to the
+        // slots they have, but not together with Barinade.
+        if (sceneNum == SCENE_GANON_BOSS || sceneNum == SCENE_GANONDORF_BOSS) {
+            return "the real Ganon fight lives in this scene";
+        }
+        if (IsBarinadeInScene()) {
+            return "Barinade is in the scene";
+        }
+        if (IsTwinrovaInScene()) {
+            return "Birova is in the scene";
+        }
+        const s32 limit = def.actorId == ACTOR_BOSS_GANON ? HIVESHOCK_MAX_GANONDORF : HIVESHOCK_MAX_GANON_BEAST;
+        if (CountTrackedOfKind(def.actorId) >= limit) {
+            return "all the Ganondorf / Ganon slots are taken";
+        }
     }
     if (def.actorId == ACTOR_EN_CLEAR_TAG) {
         if (sceneNum == SCENE_DODONGOS_CAVERN_BOSS || sceneNum == SCENE_WATER_TEMPLE_BOSS ||
             sceneNum == SCENE_SPIRIT_TEMPLE_BOSS || sceneNum == SCENE_GANONDORF_BOSS ||
             sceneNum == SCENE_FISHING_POND || sceneNum == SCENE_GANON_BOSS) {
-            return false;
+            return "Arwings do not fit in this boss room";
         }
     }
-    return true;
+    return nullptr;
 }
 
 // Actors live in one intrusive linked list per category, and Actor_Spawn inserts new ones at the HEAD. Some
@@ -1170,14 +1486,27 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
     static constexpr f32 kRadiiStalchild[] = { 45.0f, 35.0f, 50.0f, 30.0f };
     static constexpr f32 kRadiiRedead[] = { 135.0f, 115.0f, 150.0f, 100.0f, 80.0f };
     static constexpr f32 kRadiiElite[] = { 200.0f, 240.0f, 160.0f, 280.0f, 120.0f, 80.0f };
+    // Kaepora perches in front of Link, well inside his talking range. Mido is a wall: right in front of Link, close
+    // enough that he cannot walk straight past him, far enough that the two cylinders do not start overlapped.
+    static constexpr f32 kRadiiOwl[] = { 150.0f, 120.0f, 180.0f, 90.0f };
+    static constexpr f32 kRadiiMido[] = { 90.0f, 110.0f, 70.0f, 130.0f };
     const f32* radii = kRadiiDefault;
     size_t radiiCount = ARRAY_COUNT(kRadiiDefault);
     if (def.actorId == ACTOR_EN_SKB) {
         radii = kRadiiStalchild;
         radiiCount = ARRAY_COUNT(kRadiiStalchild);
-    } else if (def.actorId == ACTOR_EN_RD) {
+    } else if (def.actorId == ACTOR_EN_RD || def.actorId == ACTOR_EN_DH) {
         radii = kRadiiRedead;
         radiiCount = ARRAY_COUNT(kRadiiRedead);
+    } else if (def.actorId == ACTOR_EN_GOMA) {
+        radii = kRadiiStalchild;
+        radiiCount = ARRAY_COUNT(kRadiiStalchild);
+    } else if (def.actorId == ACTOR_EN_OWL) {
+        radii = kRadiiOwl;
+        radiiCount = ARRAY_COUNT(kRadiiOwl);
+    } else if (def.actorId == ACTOR_EN_MD) {
+        radii = kRadiiMido;
+        radiiCount = ARRAY_COUNT(kRadiiMido);
     } else if (def.weight >= kEliteWeight) {
         radii = kRadiiElite;
         radiiCount = ARRAY_COUNT(kRadiiElite);
@@ -1213,17 +1542,57 @@ bool FindSpawnPosition(const SpawnDef& def, Player* player, Vec3f& pos) {
             pos.y = floorY;
         }
     }
-    if (def.actorId == ACTOR_EN_CLEAR_TAG || def.actorId == ACTOR_EN_FIREFLY) {
+    if (def.actorId == ACTOR_EN_CLEAR_TAG || def.actorId == ACTOR_EN_FIREFLY || def.actorId == ACTOR_EN_BILI) {
         pos.y += 100.0f;
     }
-    if (def.actorId == ACTOR_EN_NIW) {
-        pos.y = player->actor.world.pos.y + 80.0f;
+    if (def.actorId == ACTOR_EN_NIW && !IsCalmCucco(def)) {
+        pos.y = player->actor.world.pos.y + 80.0f; // the angry ones dive at Link from above
     }
     // The healing fairy only heals when it floats a little above Link's feet, so do not leave it on the floor.
     if (def.actorId == ACTOR_EN_ELF) {
         pos.y += 40.0f;
     }
     return foundFloor;
+}
+
+// A Dead Hand's hands are separate actors that the room normally places around it. They grab Link, and when four of
+// them are beaten the Dead Hand comes up. HiveShock puts them on the floor around Link, away from the spot in front
+// of him where the Dead Hand rises, and makes the Dead Hand their parent so they follow its fate (see
+// KillTrackedActor, and EnDha which dies with its parent).
+constexpr s32 kDeadHandHands = 4;
+
+void SpawnDeadHandHands(Actor* deadHand, Player* player) {
+    static constexpr f32 kRadii[] = { 130.0f, 170.0f, 100.0f, 210.0f };
+    const s16 yawBase = player->actor.shape.rot.y;
+    s32 spawnedHands = 0;
+
+    for (s32 hand = 0; hand < kDeadHandHands; hand++) {
+        const s16 yaw = yawBase + static_cast<s16>(0x2000 + hand * 0x4000); // the diagonals around Link
+        for (f32 radius : kRadii) {
+            Vec3f pos = player->actor.world.pos;
+            pos.x += Math_SinS(yaw) * radius;
+            pos.z += Math_CosS(yaw) * radius;
+
+            // A hand stands on the floor: no void and no ledge far below.
+            CollisionPoly poly;
+            Vec3f rayPos = pos;
+            rayPos.y += 50.0f;
+            const f32 floorY = BgCheck_AnyRaycastFloor1(&gPlayState->colCtx, &poly, &rayPos);
+            if (floorY <= BGCHECK_Y_MIN || fabsf(floorY - player->actor.world.pos.y) > 100.0f) {
+                continue;
+            }
+            pos.y = floorY;
+
+            const s16 faceYaw = Math_Vec3f_Yaw(&pos, &player->actor.world.pos);
+            Actor* spawned = SpawnActorInAnyRoom(ACTOR_EN_DHA, pos.x, pos.y, pos.z, 0, faceYaw, 0, 0);
+            if (spawned != nullptr) {
+                spawned->parent = deadHand;
+                spawnedHands++;
+                break;
+            }
+        }
+    }
+    SPDLOG_INFO("[HiveShock] dead_hand: {} of {} hands placed", spawnedHands, kDeadHandHands);
 }
 
 ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char** whyBlocked = nullptr) {
@@ -1235,7 +1604,10 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
         return ApplyResult::Deferred;
     }
     // Not allowed in this place (boss rooms): keep the spawn for when Link is somewhere it works.
-    if (!CanSpawnInCurrentScene(def)) {
+    if (const char* sceneBlock = SceneBlockReason(def)) {
+        if (whyBlocked != nullptr) {
+            *whyBlocked = sceneBlock;
+        }
         return ApplyResult::Held;
     }
     // Room still loading, or a cutscene is running: wait rather than spawn into a half-initialised scene.
@@ -1243,6 +1615,9 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
         return ApplyResult::Deferred;
     }
     if (def.actorId == ACTOR_EN_ZF && IsLizalfosMinibossActive()) {
+        if (whyBlocked != nullptr) {
+            *whyBlocked = "the Dodongo's Cavern Lizalfos mini-boss fight is running";
+        }
         return ApplyResult::Held;
     }
     // No room in this lane: wait for an enemy to die instead of removing one.
@@ -1271,13 +1646,33 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
         return ApplyResult::Skipped;
     }
 
-    MoveActorToListTail(spawned);
+    // Barinade's parts are spawned as its children in a fixed order, which its update relies on.
+    if (!IsHiveBoss(def.actorId)) {
+        MoveActorToListTail(spawned);
+    }
 
     spawned->shape.rot.y = faceYaw;
     spawned->world.rot.y = faceYaw;
 
-    if (def.actorId == ACTOR_EN_NIW) {
+    if (def.actorId == ACTOR_EN_NIW && !IsCalmCucco(def)) {
         reinterpret_cast<EnNiw*>(spawned)->actionFunc = func_80AB70A0_nocutscene;
+    }
+
+    if (def.actorId == ACTOR_EN_DH) {
+        // EnDh_Init buries it at a random spot up to 600 units around home (possibly in a wall or over a void) and
+        // waits for its hands or a bomb to wake it. Put it where it was placed and wake it, so it rises next to Link.
+        spawned->world.pos = pos;
+        spawned->prevPos = pos;
+        spawned->params = ENDH_START_ATTACK_GRAB;
+        SpawnDeadHandHands(spawned, player);
+    }
+
+    if (def.actorId == ACTOR_EN_AM) {
+        // An Armos sleeps until Link touches or hits it. Wake it now; shakeOrigin must be set first because the
+        // waking shake is drawn around it (it is only filled in later by the sleeping state).
+        EnAm* armos = reinterpret_cast<EnAm*>(spawned);
+        armos->shakeOrigin = spawned->world.pos;
+        armos->unk_258 = 1;
     }
 
     if (!user.empty() && CVarGetInteger(CVAR_REMOTE_HIVESHOCK("EnemyNameTags"), 1)) {
@@ -1288,8 +1683,42 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
         NameTag_RegisterForActor(spawned, tag.c_str());
     }
 
+    if (def.actorId == ACTOR_EN_MD) {
+        // Mido blocks the way like he does at the start of the game (EnMd_BlockPath): he keeps 60 units from a fixed
+        // point (home) on the side facing Link, sliding along that circle to stay between Link and the point, so Link
+        // cannot reach it. The point is placed just beyond where he is spawned in front of Link. Several Midos fan out
+        // sideways to make a wider wall. His text is fixed and sets no story flag (see EnMd_GetText), and the walking
+        // away that the story version does when talked to never starts.
+        int others = 0;
+        for (const PestState& pest : gPests) {
+            others += (pest.def != nullptr && pest.def->actorId == ACTOR_EN_MD) ? 1 : 0;
+        }
+        const f32 side = ((others % 2) ? 1.0f : -1.0f) * 50.0f * static_cast<f32>((others + 1) / 2);
+        spawned->world.pos.x += Math_CosS(yawBase) * side;
+        spawned->world.pos.z -= Math_SinS(yawBase) * side;
+        spawned->prevPos = spawned->world.pos;
+
+        f32 dx = spawned->world.pos.x - player->actor.world.pos.x;
+        f32 dz = spawned->world.pos.z - player->actor.world.pos.z;
+        const f32 len = std::max(1.0f, sqrtf(dx * dx + dz * dz));
+        EnMd* mido = reinterpret_cast<EnMd*>(spawned);
+        mido->hiveShock = true;
+        mido->actionFunc = EnMd_BlockPath;
+        mido->actor.home.pos = spawned->world.pos;
+        mido->actor.home.pos.x += dx / len * 60.0f;
+        mido->actor.home.pos.z += dz / len * 60.0f;
+    }
+
+    if (def.actorId == ACTOR_EN_ELF && def.params == FAIRY_NAVI) {
+        // Her Init makes her belong to no room (-1), so she would follow Link through every room. Give her the current
+        // one: she goes away with it like any other actor, and with the scene.
+        spawned->room = static_cast<s8>(gPlayState->roomCtx.curRoom.num);
+    }
+
     if (IsTrackedSpawnName(def.name)) {
         TrackBridgeEnemy(spawned, def, user);
+    } else if (IsPestName(def.name)) {
+        TrackPest(spawned, def);
     }
     SPDLOG_INFO("[HiveShock] spawned {} at ({:.1f}, {:.1f}, {:.1f})", def.name, pos.x, pos.y, pos.z);
     return ApplyResult::Applied;
@@ -1328,7 +1757,8 @@ void UpdateTrackedEnemies() {
         } else if (tracked.sawHealth) {
             tracked.alive = false;
         }
-        if (!checkStuck || !tracked.alive) {
+        // Moving only Barinade's body would tear it away from the rest of its parts.
+        if (!checkStuck || !tracked.alive || IsHiveBoss(tracked.def->actorId)) {
             continue;
         }
 
@@ -1557,6 +1987,11 @@ void TickPendingSpawns() {
                     ++it;
                     break;
                 case ApplyResult::Held:
+                    if (gTick - gLastHeldLogTick >= kHeldLogTicks) {
+                        gLastHeldLogTick = gTick;
+                        SPDLOG_INFO("[HiveShock] '{}' is held: {}", it->name,
+                                    whyBlocked != nullptr ? whyBlocked : "not possible here right now");
+                    }
                     it->earliestTick = gTick + kHeldRecheckFrames;
                     ++it;
                     break;
@@ -2146,6 +2581,7 @@ void StopServer() {
     // Disabling is deliberate: forget everything that was waiting (and its copy on disk). If the server never ran in
     // this process the saved backlog is left alone.
     gTrackedEnemies.clear();
+    gPests.clear();
     if (gBacklogLoaded) {
         gPendingSpawns.clear();
         SaveBacklog();
@@ -2162,14 +2598,30 @@ extern "C" float HiveShock_GetOutgoingDamageMultiplier(void) {
     return CurrentOutgoingDamageMultiplier();
 }
 
+extern "C" int HiveShock_IsPestActor(const Actor* actor) {
+    if (actor == nullptr) {
+        return 0;
+    }
+    for (const PestState& pest : gPests) {
+        if (pest.actor == actor) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 HiveShock* HiveShock::Instance = nullptr;
 
 void HiveShock::Enable() {
     StartServer();
+    // Registers the per-frame hook that drains the command queue; without it, enabling from the menu after boot
+    // accepts connections but never applies anything.
+    ShipInit::Init(CVAR_NAME);
 }
 
 void HiveShock::Disable() {
     StopServer();
+    ShipInit::Init(CVAR_NAME);
 }
 
 bool HiveShock::IsEnabled() const {
@@ -2261,6 +2713,7 @@ static void RegisterHiveShock() {
         }
 
         UpdateTrackedEnemies();
+        UpdatePests();
         TickPendingSpawns();
         UpdateStatsSnapshot();
         TickQueueReport();
@@ -2276,6 +2729,50 @@ static void RegisterHiveShock() {
         }
     });
 
+    // A Gerudo Fighter with no key flag only exists when HiveShock (or the enemy randomizer) spawns it. The vanilla
+    // ones wait for a switch flag and, when they beat Link, send him to the jail; neither makes sense here.
+    COND_VB_SHOULD(VB_GERUDO_FIGHTER_CONTINUE_WAITING, enabled, {
+        EnGeldB* enGeldB = va_arg(args, EnGeldB*);
+
+        if (enGeldB->keyFlag == 0 && (!enGeldB->invisible || enGeldB->actor.xzDistToPlayer <= 300.0f)) {
+            *should = false;
+        }
+    });
+
+    // Mido only exists in the Kokiri Forest, his house and the Lost Woods; the one HiveShock sends can be anywhere.
+    COND_VB_SHOULD(VB_MIDO_SPAWN, enabled, {
+        if (gPestSpawning) {
+            *should = true;
+        }
+    });
+
+    COND_VB_SHOULD(VB_GERUDO_FIGHTER_PLAY_MINIBOSS_MUSIC, enabled, {
+        EnGeldB* enGeldB = va_arg(args, EnGeldB*);
+
+        if (enGeldB->keyFlag == 0) {
+            *should = false;
+        }
+    });
+
+    // Same as a Wallmaster: send Link back to the last entrance instead of the jail.
+    COND_VB_SHOULD(VB_GERUDO_FIGHTER_THROW_LINK_TO_JAIL, enabled, {
+        EnGeldB* enGeldB = va_arg(args, EnGeldB*);
+
+        if (enGeldB->keyFlag == 0) {
+            *should = false;
+            Sfx_PlaySfxCentered(NA_SE_OC_ABYSS);
+            Play_TriggerRespawn(gPlayState);
+        }
+    });
+
+    COND_ID_HOOK(OnEnemyDefeat, ACTOR_EN_GELDB, enabled, [](void* refActor) {
+        EnGeldB* enGeldB = static_cast<EnGeldB*>(refActor);
+
+        if (enGeldB->keyFlag == 0) {
+            Item_DropCollectibleRandom(gPlayState, &enGeldB->actor, &enGeldB->actor.world.pos, 0xC0);
+        }
+    });
+
     COND_HOOK(OnSceneInit, enabled, [](int16_t /*sceneNum*/) {
         gLastRoom = -1;
         ResetBridgeActorTracking();
@@ -2288,6 +2785,10 @@ static RegisterShipInitFunc initFunc(RegisterHiveShock, { CVAR_NAME });
 
 extern "C" float HiveShock_GetOutgoingDamageMultiplier(void) {
     return 1.0f;
+}
+
+extern "C" int HiveShock_IsPestActor(const Actor* /*actor*/) {
+    return 0;
 }
 
 HiveShock* HiveShock::Instance = nullptr;

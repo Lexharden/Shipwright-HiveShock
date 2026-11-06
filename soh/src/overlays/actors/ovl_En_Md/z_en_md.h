@@ -26,6 +26,16 @@ typedef struct EnMd {
     /* 0x0236 */ s16 fidgetTableZ[17];
     /* 0x0258 */ Vec3s jointTable[17];
     /* 0x02BE */ Vec3s morphTable[17];
-} EnMd; // size = 0x0324
+    u8 hiveShock; // spawned by HiveShock as a wall that keeps Link from passing: fixed text, no story flags
+} EnMd; // size = 0x0324 (+ hiveShock)
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+void EnMd_Idle(EnMd* thisx, PlayState* play);
+void EnMd_BlockPath(EnMd* thisx, PlayState* play);
+#ifdef __cplusplus
+}
+#endif
 
 #endif

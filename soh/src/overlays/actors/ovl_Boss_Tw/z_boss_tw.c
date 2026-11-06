@@ -6,6 +6,7 @@
 #include "soh/frame_interpolation.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/savestate_serialize.h"
+#include "soh/Network/HiveShock/HiveShockBossDeath.h"
 
 #include <string.h>
 
@@ -166,6 +167,11 @@ static Vec3f sTwinrovaPillarPos[] = {
 };
 
 static u8 sTwInitialized = false;
+
+// HiveShock: set while a Twinrova that HiveShock spawned is in the game. That Twinrova starts in her second phase (the
+// sisters are already merged and hidden, as they are after the real merge), there is no arena: she flies around Link
+// wherever he is, her blasts land on whatever floor is below, and any shield reflects them. When beaten she explodes.
+static u8 sHiveShock = false;
 
 static InitChainEntry sInitChain[] = {
     ICHAIN_U8(targetMode, 5, ICHAIN_CONTINUE),
@@ -417,6 +423,100 @@ void BossTw_AddShieldHitEffect(PlayState* play, f32 arg1, s16 arg2) {
     }
 }
 
+// ------------------------------------------------------------------ HiveShock
+
+// The real fight needs the Mirror Shield to bounce the beams and blasts back. Outside the arena Link may not even own
+// it, so in HiveShock any shield held up does the job.
+static s32 BossTw_ShieldReflects(PlayState* play) {
+    return sHiveShock || Player_HasMirrorShieldEquipped(play);
+}
+
+// How high Twinrova hovers: 140 above the floor Link stands on (the arena floor is at 240, she hovers at 380).
+static f32 BossTw_HoverY(PlayState* play) {
+    return sHiveShock ? GET_PLAYER(play)->actor.world.pos.y + 140.0f : 380.0f;
+}
+
+// Picks where Twinrova flies to next: a spot around Link, as far as the room allows (the arena's four pillars, made
+// relative to Link). The spot needs floor under it at about Link's level and a clear line to Link, so she never goes
+// behind a wall to shoot through it.
+static void BossTw_HiveShockPickTarget(BossTw* this, PlayState* play) {
+    static const f32 sRadii[] = { 420.0f, 320.0f, 220.0f };
+    Player* player = GET_PLAYER(play);
+    s16 startYaw = (s16)((u16)Rand_ZeroFloat(65535.0f));
+    s32 radius;
+    s32 dir;
+
+    for (radius = 0; radius < ARRAY_COUNT(sRadii); radius++) {
+        for (dir = 0; dir < 8; dir++) {
+            s16 yaw = (s16)(startYaw + dir * 0x2000);
+            Vec3f probe;
+            Vec3f eye;
+            Vec3f spot;
+            Vec3f hit;
+            CollisionPoly* poly;
+            f32 floorY;
+
+            probe.x = player->actor.world.pos.x + Math_SinS(yaw) * sRadii[radius];
+            probe.y = player->actor.world.pos.y + 80.0f;
+            probe.z = player->actor.world.pos.z + Math_CosS(yaw) * sRadii[radius];
+            floorY = BgCheck_EntityRaycastFloor1(&play->colCtx, &poly, &probe);
+            if (floorY <= BGCHECK_Y_MIN || fabsf(floorY - player->actor.world.pos.y) > 150.0f) {
+                continue;
+            }
+
+            eye = player->actor.world.pos;
+            eye.y += 60.0f;
+            spot = probe;
+            spot.y = floorY + 160.0f;
+            if (BgCheck_AnyLineTest1(&play->colCtx, &eye, &spot, &hit, &poly, true)) {
+                continue;
+            }
+
+            this->targetPos.x = probe.x;
+            this->targetPos.y = player->actor.world.pos.y + 240.0f;
+            this->targetPos.z = probe.z;
+            return;
+        }
+    }
+
+    // Nowhere to go (a tiny room): hover above Link, a little behind him.
+    this->targetPos.x = player->actor.world.pos.x + Math_SinS(player->actor.shape.rot.y + 0x8000) * 120.0f;
+    this->targetPos.y = player->actor.world.pos.y + 240.0f;
+    this->targetPos.z = player->actor.world.pos.z + Math_CosS(player->actor.shape.rot.y + 0x8000) * 120.0f;
+}
+
+// Twinrova's sisters and her blasts are separate actors that keep state for her; none of them outlive her.
+static void BossTw_HiveShockKillParts(BossTw* keep, PlayState* play) {
+    Actor* it;
+
+    for (it = play->actorCtx.actorLists[ACTORCAT_BOSS].head; it != NULL; it = it->next) {
+        if (it->id == ACTOR_BOSS_TW && it != &keep->actor) {
+            Actor_Kill(it);
+        }
+    }
+}
+
+// The state the real fight is in right after the sisters merge and the cutscene ends: the sisters hidden, Twinrova out
+// and flying to her first spot.
+static void BossTw_HiveShockStart(BossTw* this, PlayState* play) {
+    BossTw_SetupWait(sKotakePtr, play);
+    BossTw_SetupWait(sKoumePtr, play);
+
+    this->visible = true;
+    this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED;
+    this->actor.shape.rot.y = 0;
+    Actor_SetScale(&this->actor, 0.007f);
+    this->work[TW_PLLR_IDX] = 0;
+    sEnvType = 0;
+    BossTw_TwinrovaSetupFly(this, play);
+}
+
+// She has no death scene here: she explodes where she hovers.
+static void BossTw_HiveShockDie(BossTw* this, PlayState* play) {
+    BossTw_HiveShockKillParts(this, play);
+    HiveShock_BossExplode(play, &this->actor, true);
+}
+
 void BossTw_Init(Actor* thisx, PlayState* play2) {
     PlayState* play = play2;
     BossTw* this = (BossTw*)thisx;
@@ -461,7 +561,7 @@ void BossTw_Init(Actor* thisx, PlayState* play2) {
     this->actor.colChkInfo.health = 0;
     Collider_InitCylinder(play, &this->collider);
 
-    if (!sTwInitialized) {
+    if (!sTwInitialized || (gHiveShockBossSpawn && this->actor.params == TW_TWINROVA)) {
         sTwInitialized = true;
         play->envCtx.unk_BF = 1;
         play->envCtx.unk_BE = 1;
@@ -527,8 +627,9 @@ void BossTw_Init(Actor* thisx, PlayState* play2) {
         SkelAnime_InitFlex(play, &this->skelAnime, &gTwinrovaSkel, &gTwinrovaTPoseAnim, NULL, NULL, 0);
         Animation_MorphToLoop(&this->skelAnime, &gTwinrovaTPoseAnim, -3.0f);
 
-        if (Flags_GetEventChkInf(EVENTCHKINF_BEGAN_TWINROVA_BATTLE)) {
-            // began twinrova battle
+        sHiveShock = gHiveShockBossSpawn != 0;
+        if (sHiveShock || Flags_GetEventChkInf(EVENTCHKINF_BEGAN_TWINROVA_BATTLE)) {
+            // began twinrova battle (HiveShock: sent on to the second phase below, once the sisters exist)
             BossTw_SetupWait(this, play);
         } else if (GameInteractor_Should(VB_PLAY_TWINROVA_INTRO_CS, true, this, play)) {
             BossTw_TwinrovaSetupIntroCS(this, play);
@@ -540,7 +641,7 @@ void BossTw_Init(Actor* thisx, PlayState* play2) {
         this->actor.params = TW_TWINROVA;
         sTwinrovaPtr = this;
 
-        if (Flags_GetClear(play, play->roomCtx.curRoom.num)) {
+        if (!sHiveShock && Flags_GetClear(play, play->roomCtx.curRoom.num)) {
             // twinrova has been defeated.
             Actor_Kill(&this->actor);
             if (GameInteractor_Should(VB_SPAWN_BLUE_WARP, true, this)) {
@@ -560,6 +661,9 @@ void BossTw_Init(Actor* thisx, PlayState* play2) {
                                             this->actor.world.pos.y, this->actor.world.pos.z, 0, 0, 0, TW_KOUME);
             sKotakePtr->actor.parent = &sKoumePtr->actor;
             sKoumePtr->actor.parent = &sKotakePtr->actor;
+            if (sHiveShock) {
+                BossTw_HiveShockStart(this, play);
+            }
         }
     }
 
@@ -580,6 +684,15 @@ void BossTw_Destroy(Actor* thisx, PlayState* play) {
 
     if (thisx->params == TW_TWINROVA) {
         sTwInitialized = false;
+        if (sHiveShock) {
+            // The blast flashes tint the scene through these; leave it as it was.
+            sHiveShock = false;
+            play->envCtx.unk_D8 = 0.0f;
+            play->envCtx.unk_BD = 0;
+            play->envCtx.unk_BE = 0;
+            play->envCtx.unk_BF = 0;
+            play->envCtx.unk_DC = 0;
+        }
     }
 }
 
@@ -844,7 +957,7 @@ s32 BossTw_CheckBeamReflection(BossTw* this, PlayState* play) {
             // and the distance from the beams origin to 10 units in front of link is less than the beams
             // current distance (the distance of the beam is equal to or longer than the distance to 10 units
             // in front of link)
-            if (Player_HasMirrorShieldEquipped(play)) {
+            if (BossTw_ShieldReflects(play)) {
                 // player has mirror shield equipped
                 this->beamDist = sqrtf(SQ(offset.x) + SQ(offset.y) + SQ(offset.z));
                 return 1;
@@ -895,6 +1008,24 @@ s32 BossTw_BeamReflHitCheck(BossTw* this, Vec3f* pos) {
 
 f32 BossTw_GetFloorY(Vec3f* pos) {
     Vec3f posRotated;
+
+    if (sHiveShock) {
+        // No arena: the floor is whatever is under the blast. Same answers as below: the floor's height once the blast
+        // reaches it, -100 while it is still in the air.
+        CollisionPoly* poly;
+        Vec3f probe = *pos;
+        f32 floorY;
+
+        probe.y += 30.0f;
+        floorY = BgCheck_EntityRaycastFloor1(&gPlayState->colCtx, &poly, &probe);
+        if (floorY <= BGCHECK_Y_MIN || pos->y > floorY + 10.0f) {
+            return -100.0f;
+        }
+        if (floorY == 35.0f) {
+            floorY += 0.5f; // 35 means "out of bounds" to the callers
+        }
+        return floorY < 0.0f ? 0.0f : floorY;
+    }
 
     if (fabsf(pos->x) < 350.0f && fabsf(pos->z) < 350.0f && pos->y < 240.0f) {
         if (pos->y > 200.0f) {
@@ -3684,7 +3815,7 @@ void BossTw_ShieldChargeDraw(BossTw* this, PlayState* play) {
         temp_t0 = 1;
     }
 
-    if (Player_HasMirrorShieldEquipped(play)) {
+    if (BossTw_ShieldReflects(play)) {
         if (temp_t0 != 0) {
             Matrix_Mult(&player->shieldMf, MTXMODE_NEW);
             Matrix_RotateX(M_PI / 2.0f, MTXMODE_APPLY);
@@ -3723,7 +3854,7 @@ void BossTw_ShieldChargeDraw(BossTw* this, PlayState* play) {
         Math_ApproachF(&D_8094C858, 0.0f, 1.0f, step);
     }
 
-    if (Player_HasMirrorShieldEquipped(play) && D_8094C858 > 0.0f) {
+    if (BossTw_ShieldReflects(play) && D_8094C858 > 0.0f) {
         f32 scale = D_8094C872 > 0 ? 1.3f : 1.0f;
 
         Matrix_Mult(&player->shieldMf, MTXMODE_NEW);
@@ -4299,7 +4430,7 @@ s32 BossTw_BlastShieldCheck(BossTw* this, PlayState* play) {
                 play->envCtx.unk_D8 = 1.0f;
                 Rumble_Request(0.0f, 100, 5, 4);
 
-                if (Player_HasMirrorShieldEquipped(play)) {
+                if (BossTw_ShieldReflects(play)) {
                     if (this->blastType == 1) {
                         if (sShieldIceCharge != 0) {
                             sShieldIceCharge = 0;
@@ -4368,6 +4499,11 @@ void BossTw_BlastUpdate(Actor* thisx, PlayState* play) {
     this->blastTailPos[this->work[TAIL_IDX]] = this->actor.world.pos;
 
     this->actionFunc(this, play);
+
+    if (sHiveShock && (this->actor.params == TW_FIRE_BLAST || this->actor.params == TW_ICE_BLAST) &&
+        this->csState1 == 1 && this->timers[0] == 0 && this->work[CS_TIMER_1] > 300) {
+        Actor_Kill(&this->actor);
+    }
 
     for (i = 0; i < 5; i++) {
         if (this->timers[i] != 0) {
@@ -5116,7 +5252,7 @@ void BossTw_TwinrovaArriveAtTarget(BossTw* this, PlayState* play) {
     SkelAnime_Update(&this->skelAnime);
     Math_ApproachF(&this->actor.world.pos.x, this->targetPos.x, 0.1f, fabsf(this->actor.velocity.x) * 1.5f);
     Math_ApproachF(&this->actor.world.pos.y, this->targetPos.y, 0.1f, fabsf(this->actor.velocity.y) * 1.5f);
-    Math_ApproachF(&this->targetPos.y, 380.0f, 1.0f, 2.0f);
+    Math_ApproachF(&this->targetPos.y, BossTw_HoverY(play), 1.0f, 2.0f);
     Math_ApproachF(&this->actor.world.pos.z, this->targetPos.z, 0.1f, fabsf(this->actor.velocity.z) * 1.5f);
 
     if (this->timers[1] == 1) {
@@ -5261,6 +5397,11 @@ void BossTw_TwinrovaDamage(BossTw* this, PlayState* play, u8 damage) {
             this->actor.colChkInfo.health = 0;
         }
 
+        if ((s8)this->actor.colChkInfo.health <= 0 && sHiveShock) {
+            BossTw_HiveShockDie(this, play);
+            return;
+        }
+
         if ((s8)this->actor.colChkInfo.health <= 0) {
             BossTw_TwinrovaSetupDeathCS(this, play);
             Enemy_StartFinishingBlow(play, &this->actor);
@@ -5362,16 +5503,20 @@ void BossTw_TwinrovaSetupFly(BossTw* this, PlayState* play) {
     f32 xzDist;
     Player* player = GET_PLAYER(play);
 
-    do {
-        this->work[TW_PLLR_IDX] += (s16)(((s16)Rand_ZeroFloat(2.99f)) + 1);
-        this->work[TW_PLLR_IDX] %= 4;
-        this->targetPos = sTwinrovaPillarPos[this->work[TW_PLLR_IDX]];
-        xDiff = this->targetPos.x - player->actor.world.pos.x;
-        zDiff = this->targetPos.z - player->actor.world.pos.z;
-        xzDist = SQ(xDiff) + SQ(zDiff);
-    } while (!(xzDist > SQ(300.0f)));
+    if (sHiveShock) {
+        BossTw_HiveShockPickTarget(this, play);
+    } else {
+        do {
+            this->work[TW_PLLR_IDX] += (s16)(((s16)Rand_ZeroFloat(2.99f)) + 1);
+            this->work[TW_PLLR_IDX] %= 4;
+            this->targetPos = sTwinrovaPillarPos[this->work[TW_PLLR_IDX]];
+            xDiff = this->targetPos.x - player->actor.world.pos.x;
+            zDiff = this->targetPos.z - player->actor.world.pos.z;
+            xzDist = SQ(xDiff) + SQ(zDiff);
+        } while (!(xzDist > SQ(300.0f)));
 
-    this->targetPos.y = 480.0f;
+        this->targetPos.y = 480.0f;
+    }
     xDiff = this->targetPos.x - this->actor.world.pos.x;
     yDiff = this->targetPos.y - this->actor.world.pos.y;
     zDiff = this->targetPos.z - this->actor.world.pos.z;
@@ -5410,7 +5555,7 @@ void BossTw_TwinrovaFly(BossTw* this, PlayState* play) {
     Actor_UpdateVelocityXYZ(&this->actor);
     Math_ApproachF(&this->actor.world.pos.x, this->targetPos.x, 0.1f, fabsf(this->actor.velocity.x) * 1.5f);
     Math_ApproachF(&this->actor.world.pos.y, this->targetPos.y, 0.1f, fabsf(this->actor.velocity.y) * 1.5f);
-    Math_ApproachF(&this->targetPos.y, 380.0f, 1.0f, 2.0f);
+    Math_ApproachF(&this->targetPos.y, BossTw_HoverY(play), 1.0f, 2.0f);
     Math_ApproachF(&this->actor.world.pos.z, this->targetPos.z, 0.1f, fabsf(this->actor.velocity.z) * 1.5f);
 
     if (xzDist < 200.0f) {
@@ -5460,5 +5605,6 @@ void BossTw_TwinrovaLaugh(BossTw* this, PlayState* play) {
 
 void BossTw_Reset(void) {
     sTwInitialized = false;
+    sHiveShock = false;
     memset(sEffects, 0, sizeof(sEffects));
 }
