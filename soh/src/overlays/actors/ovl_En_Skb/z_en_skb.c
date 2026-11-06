@@ -290,8 +290,8 @@ void EnSkb_Advance(EnSkb* this, PlayState* play) {
         }
     }
     // Don't despawn stallchildren during daytime or when a stalchildren walks too far away from his "home" when enemy
-    // randomizer is enabled. With HiveShock on they stay too (the ones a viewer sends must not sink back into the ground
-    // at daytime or when they are far from where they appeared), same as in func_80AFCD60.
+    // randomizer is enabled. With HiveShock on they stay too (the ones a viewer sends must not sink back into the
+    // ground at daytime or when they are far from where they appeared), same as in func_80AFCD60.
     if ((Math_Vec3f_DistXZ(&this->actor.home.pos, &player->actor.world.pos) > 800.0f || IS_DAY) &&
         !CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) &&
         !CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0)) {

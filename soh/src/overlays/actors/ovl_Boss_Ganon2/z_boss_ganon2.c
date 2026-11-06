@@ -96,11 +96,11 @@ static s8 D_80910638;
     F(sEffects)
 SHIP_SAVESTATE_DEFINE(BossGanon2, BOSS_GANON2_SHIP_SAVESTATE_FIELDS)
 
-// HiveShock can have several beasts at once. The variables above (and D_80906D78 / D_80907080 from the data file) belong
-// to ONE fight, so every HiveShock beast owns a slot with its own copy. Slot 0 is the story fight and keeps using the
-// variables directly. Each callback of a beast loads its slot into the variables on entry and stores it back on exit,
-// so the rest of the file keeps reading and writing the variables as it always did. The effect pool is not copied:
-// play->specialEffects is pointed at the slot's own pool while the callback runs and put back afterwards.
+// HiveShock can have several beasts at once. The variables above (and D_80906D78 / D_80907080 from the data file)
+// belong to ONE fight, so every HiveShock beast owns a slot with its own copy. Slot 0 is the story fight and keeps
+// using the variables directly. Each callback of a beast loads its slot into the variables on entry and stores it back
+// on exit, so the rest of the file keeps reading and writing the variables as it always did. The effect pool is not
+// copied: play->specialEffects is pointed at the slot's own pool while the callback runs and put back afterwards.
 typedef struct {
     Vec3f vec8090EB20;
     s8 val80910638;
@@ -2156,8 +2156,8 @@ void func_80902348(BossGanon2* this, PlayState* play) {
             player->bodyIsBurning = true;
             Actor_SetPlayerKnockbackLarge(play, &this->actor, 10.0f, Math_Atan2S(temp_f12, temp_f2), 0.0f, 0x10);
             if (sZelda != NULL) {
-                    sZelda->unk_3C8 = 8;
-                }
+                sZelda->unk_3C8 = 8;
+            }
         }
     }
 }

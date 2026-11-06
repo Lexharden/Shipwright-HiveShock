@@ -1727,8 +1727,8 @@ void BossVa_BodyDeath(BossVa* this, PlayState* play) {
                     play->envCtx.adjFogNear = play->envCtx.adjFogFar = 0;
                     play->envCtx.adjAmbientColor[0] = play->envCtx.adjAmbientColor[1] =
                         play->envCtx.adjAmbientColor[2] = 0;
-                    play->envCtx.adjLight1Color[0] = play->envCtx.adjLight1Color[1] =
-                        play->envCtx.adjLight1Color[2] = 0;
+                    play->envCtx.adjLight1Color[0] = play->envCtx.adjLight1Color[1] = play->envCtx.adjLight1Color[2] =
+                        0;
                     play->envCtx.screenFillColor[3] = 0;
                     play->envCtx.fillScreen = false;
                     for (i = 0; i < 3; i++) {

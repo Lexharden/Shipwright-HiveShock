@@ -1477,8 +1477,7 @@ void EnIk_Init(Actor* thisx, PlayState* play) {
 
     // HiveShock spawns Nabooru with switch flag 0xFF (the real one uses another): it ignores the finished-battle flag
     // so it can appear after the Spirit Temple was beaten.
-    this->hiveShockNabooru = CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0) &&
-                             ((u16)this->actor.params == 0xFF00);
+    this->hiveShockNabooru = CVarGetInteger(CVAR_REMOTE_HIVESHOCK("Enabled"), 0) && ((u16)this->actor.params == 0xFF00);
 
     if (!this->hiveShockNabooru &&
         (((this->actor.params & 0xFF) == 0 && (Flags_GetEventChkInf(EVENTCHKINF_FINISHED_NABOORU_BATTLE))) ||

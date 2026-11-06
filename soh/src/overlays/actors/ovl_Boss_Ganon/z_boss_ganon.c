@@ -149,9 +149,9 @@ static GanondorfEffect sEffects[200];
     F(sEffects)
 SHIP_SAVESTATE_DEFINE(BossGanon, BOSS_GANON_SHIP_SAVESTATE_FIELDS)
 
-// HiveShock can have several Ganondorfs at once. The seeds, the cape, Ganondorf himself, Zelda and the effect pool above
-// all belong to ONE fight, so every HiveShock Ganondorf owns a slot with its own copy. Slot 0 is the story fight and
-// keeps using the variables directly. Every callback of a Ganondorf, or of anything he spawned (the energy balls),
+// HiveShock can have several Ganondorfs at once. The seeds, the cape, Ganondorf himself, Zelda and the effect pool
+// above all belong to ONE fight, so every HiveShock Ganondorf owns a slot with its own copy. Slot 0 is the story fight
+// and keeps using the variables directly. Every callback of a Ganondorf, or of anything he spawned (the energy balls),
 // loads its slot into the variables on entry and stores it back on exit, so the rest of the file keeps reading and
 // writing the variables as it always did. The effect pool is not copied: play->specialEffects is pointed at the slot's
 // own pool while the callback runs and put back afterwards.
@@ -2502,9 +2502,9 @@ void BossGanon_Wait(BossGanon* this, PlayState* play) {
     if ((this->unk_1C2 == 0) && !(player->actor.world.pos.y < center.y - 200.0f)) {
         // In the tower Link standing near the middle gets the floor pound; here that is Link standing near him.
         if (!(player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE) &&
-            (this->hiveShock ? (this->actor.xzDistToPlayer < 110.0f)
-                             : ((fabsf(player->actor.world.pos.x) < 110.0f) &&
-                                (fabsf(player->actor.world.pos.z) < 110.0f)))) {
+            (this->hiveShock
+                 ? (this->actor.xzDistToPlayer < 110.0f)
+                 : ((fabsf(player->actor.world.pos.x) < 110.0f) && (fabsf(player->actor.world.pos.z) < 110.0f)))) {
             BossGanon_SetupPoundFloor(this, play);
         } else if ((this->timers[0] == 0) && !(player->stateFlags1 & PLAYER_STATE1_HANGING_OFF_LEDGE)) {
             this->timers[0] = (s16)Rand_ZeroFloat(30.0f) + 30;

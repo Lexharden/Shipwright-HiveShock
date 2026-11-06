@@ -21,12 +21,12 @@ enum class State {
 
 struct Snapshot {
     State state = State::Idle;
-    std::string current;  // tag of this build, empty on development builds
-    std::string latest;   // tag of the newest release, empty until checked
-    std::string message;  // short status line for the menu
-    std::string location; // folder where the download was saved (Ready)
+    std::string current;    // tag of this build, empty on development builds
+    std::string latest;     // tag of the newest release, empty until checked
+    std::string message;    // short status line for the menu
+    std::string location;   // folder where the download was saved (Ready)
     std::string releaseUrl; // page of the newest release on GitHub
-    int percent = 0;      // 0-100 while Downloading
+    int percent = 0;        // 0-100 while Downloading
 };
 
 Snapshot GetSnapshot();

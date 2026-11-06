@@ -254,10 +254,9 @@ void CheckWorker() {
     std::error_code ec;
     fs::remove(jsonFile, ec);
 
-    const int code =
-        RunProgram({ kCurl, "-sSfL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", "-H",
-                     "User-Agent: Shipwright-HiveShock-Updater", kApiUrl, "-o", jsonFile.string() },
-                   true);
+    const int code = RunProgram({ kCurl, "-sSfL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", "-H",
+                                  "User-Agent: Shipwright-HiveShock-Updater", kApiUrl, "-o", jsonFile.string() },
+                                true);
     if (code != 0) {
         SetState(State::Error, "Could not reach GitHub (curl exit " + std::to_string(code) + ")");
         return;
@@ -350,8 +349,8 @@ void DownloadWorker() {
     }
     SetState(State::Downloading, "Downloading " + name + "...");
 
-    const int code = RunProgram({ kCurl, "-sSfL", "--retry", "2", "--max-time", "1800", url, "-o", partFile.string() },
-                                true);
+    const int code =
+        RunProgram({ kCurl, "-sSfL", "--retry", "2", "--max-time", "1800", url, "-o", partFile.string() }, true);
     if (code != 0) {
         fs::remove(partFile, ec);
         SetState(State::Error, "Download failed (curl exit " + std::to_string(code) + ")");

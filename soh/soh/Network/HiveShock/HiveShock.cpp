@@ -108,8 +108,8 @@ constexpr s32 kDefaultMaxSceneEnemies = 40;
 constexpr s32 kDefaultMaxLoad = 14;
 // Gameplay runs at 20 frames/s. Spawns are released at most one every ~0.4 s so a refill never arrives as a burst.
 constexpr u32 kSpawnGapFrames = 8;
-// Enemies this heavy or heavier are "elite": they go ahead of the ordinary ones in the queue (Iron Knuckle, Garo Master,
-// Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, Floormaster, White Wolfos). Turn off with
+// Enemies this heavy or heavier are "elite": they go ahead of the ordinary ones in the queue (Iron Knuckle, Garo
+// Master, Eyegore, Dark Link, Dinolfos, Lizalfos, Stalfos, Garo, Floormaster, White Wolfos). Turn off with
 // gRemote.HiveShock.ElitePriority.
 constexpr u8 kEliteWeight = 3;
 // Elite head start: points reserved for elite enemies on top of MaxLoad, so the first ones enter at once
@@ -187,9 +187,9 @@ struct WarpAlias {
 struct PendingSpawn {
     std::string name;
     std::string user;
-    u32 earliestTick = 0; // compared against gTick
-    u32 attempts = 0;     // failed placements, only used to throttle logging
-    s64 createdAt = 0;    // unix seconds, only used to expire entries restored from disk
+    u32 earliestTick = 0;  // compared against gTick
+    u32 attempts = 0;      // failed placements, only used to throttle logging
+    s64 createdAt = 0;     // unix seconds, only used to expire entries restored from disk
     bool requeued = false; // an enemy that was already counted as spawned and is coming back after a scene change
 };
 
