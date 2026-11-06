@@ -212,14 +212,6 @@ struct PestState {
     u32 expireTick = 0;
 };
 
-// A Navi sent by a viewer. She follows Link through rooms and scenes (she is invoked again after each scene load) and
-// is only dismissed when Link dies.
-struct NaviState {
-    Actor* actor = nullptr;
-    const SpawnDef* def = nullptr;
-    std::string user;
-};
-
 std::mutex gQueueMutex;
 std::deque<json> gCommandQueue;
 
@@ -265,8 +257,6 @@ BuffState gBuffs[static_cast<size_t>(BridgeBuff::Count)]{};
 std::deque<PendingSpawn> gPendingSpawns;
 std::vector<TrackedEnemy> gTrackedEnemies;
 std::vector<PestState> gPests;
-std::vector<NaviState> gNavis;
-NaviState* gNaviRespawnSlot = nullptr; // set while a lost Navi is being invoked again, so she is not added twice
 // True while Actor_Spawn runs for a pest: lets the VB_MIDO_SPAWN hook tell HiveShock's Mido from the game's.
 bool gPestSpawning = false;
 // Monotonic game-update counter. Unlike gameplayFrames it does not restart on every scene load, so delays and
@@ -1190,9 +1180,6 @@ void ClearPendingSpawns() {
 // "Enemies disappear on zone change" they are not queued again: they are left behind and counted as defeated.
 void ResetBridgeActorTracking() {
     gPests.clear(); // passing effects: they are left behind with the scene, never queued again
-    for (NaviState& navi : gNavis) {
-        navi.actor = nullptr; // the old one is gone with the scene; UpdateNavis invokes her again beside Link
-    }
     if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("DespawnOnZoneChange"), 0)) {
         if (!gTrackedEnemies.empty()) {
             gStatDefeated += static_cast<int>(gTrackedEnemies.size());
@@ -1723,11 +1710,9 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
     }
 
     if (def.actorId == ACTOR_EN_ELF && def.params == FAIRY_NAVI) {
-        if (gNaviRespawnSlot != nullptr) {
-            gNaviRespawnSlot->actor = spawned;
-        } else {
-            gNavis.push_back({ spawned, &def, user });
-        }
+        // Her Init makes her belong to no room (-1), so she would follow Link through every room. Give her the current
+        // one: she goes away with it like any other actor, and with the scene.
+        spawned->room = static_cast<s8>(gPlayState->roomCtx.curRoom.num);
     }
 
     if (IsTrackedSpawnName(def.name)) {
@@ -1737,39 +1722,6 @@ ApplyResult SpawnDefNow(const SpawnDef& def, const std::string& user, const char
     }
     SPDLOG_INFO("[HiveShock] spawned {} at ({:.1f}, {:.1f}, {:.1f})", def.name, pos.x, pos.y, pos.z);
     return ApplyResult::Applied;
-}
-
-// Navi goes away only when Link dies (or HiveShock is turned off / the game returns to the title screen).
-void ClearNavis() {
-    for (NaviState& navi : gNavis) {
-        if (navi.actor != nullptr && ActorStillLoaded(navi.actor) && navi.actor->id == ACTOR_EN_ELF) {
-            KillTrackedActor(navi.actor);
-        }
-    }
-    gNavis.clear();
-}
-
-// Keeps every Navi next to Link: after a scene load the old one is gone, so she is invoked again beside him.
-void UpdateNavis() {
-    if (gNavis.empty() || gPlayState == nullptr) {
-        return;
-    }
-    if (gPlayState->gameOverCtx.state != GAMEOVER_INACTIVE) {
-        return;
-    }
-    for (size_t i = 0; i < gNavis.size(); i++) {
-        NaviState& navi = gNavis[i];
-        if (navi.actor != nullptr && ActorStillLoaded(navi.actor) && navi.actor->id == ACTOR_EN_ELF) {
-            continue;
-        }
-        navi.actor = nullptr;
-        if (navi.def == nullptr || ShouldDeferDangerousEffects()) {
-            continue;
-        }
-        gNaviRespawnSlot = &navi;
-        SpawnDefNow(*navi.def, navi.user);
-        gNaviRespawnSlot = nullptr;
-    }
 }
 
 // Moves a stuck enemy next to Link. The enemy is NOT removed, so the viewer's gift keeps fighting.
@@ -2630,7 +2582,6 @@ void StopServer() {
     // this process the saved backlog is left alone.
     gTrackedEnemies.clear();
     gPests.clear();
-    gNavis.clear();
     if (gBacklogLoaded) {
         gPendingSpawns.clear();
         SaveBacklog();
@@ -2743,7 +2694,6 @@ static void RegisterHiveShock() {
             // queued.
             gLastRoom = -1;
             ResetBridgeActorTracking();
-            gNavis.clear(); // back at the title screen: the Navis do not carry over to another save
             UpdateStatsSnapshot();
             TickQueueReport();
             TickBacklogPersistence();
@@ -2764,7 +2714,6 @@ static void RegisterHiveShock() {
 
         UpdateTrackedEnemies();
         UpdatePests();
-        UpdateNavis();
         TickPendingSpawns();
         UpdateStatsSnapshot();
         TickQueueReport();
@@ -2772,7 +2721,6 @@ static void RegisterHiveShock() {
 
         if (gPlayState->gameOverCtx.state == GAMEOVER_DEATH_WAIT_GROUND && !gDeathCountedThisCycle) {
             RegisterDeath("player death");
-            ClearNavis();
             if (CVarGetInteger(CVAR_REMOTE_HIVESHOCK("DefeatOnDeath"), 0)) {
                 DefeatAliveEnemies("Link died");
             }
